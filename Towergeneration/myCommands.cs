@@ -1,19 +1,23 @@
 ﻿// =============================================================================
 //  TowerGeneration – Advance Steel Plugin
-//  Generates a freestanding open-frame tower made entirely from L-angle sections.
+//  Slanted lattice tower – tapered square section, wider at base than top.
 //
-//  Structure layout (no bottom frame):
+//  Dimensions (mm):
+//    Base square  : 11875 x 11875  (Z = 0)
+//    Top  square  :  8875 x  8875  (Z = 8550)
+//    Height       :  8550
 //
-//      ┌──────────────────┐   ← Top rectangular frame    (Z = 3000 mm)
-//      │                  │
-//      ├──────────────────┤   ← Middle rectangular frame  (Z = 1200 mm)
-//      │                  │
-//     leg  leg  leg  leg      ← Four independent legs, free at bottom (Z = 0)
+//  Structure per face (4 faces total):
+//    - 2 slanted corner legs  (base outer corner → top inner corner)
+//    - 2 cross diagonals (X-brace): base-left→top-right, base-right→top-left
 //
-//  All members: L-angle sections via StraightBeam.
-//  Profile format: "TableName#@§@#SectionSize"
+//  Top view (plan):
+//    Outer square = base corners
+//    Inner square = top corners
+//    Each corner: one slanted leg connecting outer-base to inner-top
 //
-//  Run inside Advance Steel with command:  GENERATETOWER
+//  Profile: "AISC 15.0 Angle identical#@§@#L3-1/2X3-1/2X1/4"
+//  Command: GENERATETOWER
 // =============================================================================
 
 using Autodesk.AutoCAD.Runtime;
@@ -22,10 +26,10 @@ using Autodesk.AutoCAD.Runtime;
 using ASPoint3d  = Autodesk.AdvanceSteel.Geometry.Point3d;
 using ASVector3d = Autodesk.AdvanceSteel.Geometry.Vector3d;
 
-// Advance Steel structural objects (StraightBeam lives here)
+// Advance Steel structural objects
 using Autodesk.AdvanceSteel.Modelling;
 
-// Advance Steel transaction manager and document lock
+// Advance Steel transaction and document management
 using Autodesk.AdvanceSteel.CADAccess;
 using Autodesk.AdvanceSteel.DocumentManagement;
 
@@ -39,178 +43,166 @@ namespace Towergeneration
     public class MyCommands
     {
         // -----------------------------------------------------------------------
-        //  Tower geometry  (all values in millimetres – change freely)
+        //  Tower geometry (all mm)
+        //
+        //  The tower is centred at the world origin.
+        //  Base corners are at ±BaseHalf in X and Y at Z=0.
+        //  Top  corners are at ±TopHalf  in X and Y at Z=Height.
+        //  Each leg runs from a base corner diagonally up to the nearest top corner,
+        //  so the tower tapers inward as it rises.
         // -----------------------------------------------------------------------
-        private const double TotalHeight  = 3000.0;   // full tower height
-        private const double Width        = 1000.0;   // X footprint
-        private const double Depth        =  800.0;   // Y footprint
-        private const double MidElevation = 1200.0;   // middle frame height
+        private const double BaseWidth = 11875.0;   // base square side length
+        private const double TopWidth  =  8875.0;   // top  square side length
+        private const double Height    =  8550.0;   // vertical height
+
+        // Half-widths (tower is centred at origin)
+        private const double BaseHalf = BaseWidth / 2.0;   // 5937.5
+        private const double TopHalf  = TopWidth  / 2.0;   // 4437.5
 
         // -----------------------------------------------------------------------
-        //  L-angle profile
-        //
-        //  Format:  "SectionTable#@§@#SectionSize"
-        //
-        //  The table name must match exactly what is in YOUR Advance Steel
-        //  section library.  To find it:
-        //    1. In Advance Steel type command:  ASTORPROFILES
-        //    2. Browse to the Angles / Equal Leg Angles group
-        //    3. Note the exact table name shown in the header
-        //
-        //  Common table names by region:
-        //    International  →  "EN 10056-1 - Equal Leg Angles"
-        //    USA (AISC)     →  "AISC Angles"
-        //    Australia/NZ   →  "AS/NZS 3679.1 - Equal Angles"
-        //
-        //  Update AngleTable and AngleSection below to match your installation.
+        //  Profile key – two-part format: "RunName#@§@#SectionName"
+        //  Sourced directly from AstorProfiles.mdf (USA, AISC 15.0 equal angles).
         // -----------------------------------------------------------------------
-        private const string AngleTable   = "EN 10056-1 - Equal Leg Angles";
-        private const string AngleSection = "L50x50x5";
-
-        // Combined profile key used by StraightBeam constructor
-        private static readonly string AngleProfile =
-            $"{AngleTable}#@§@#{AngleSection}";
+        private const string AngleProfile =
+            "AISC 15.0 Angle identical#@§@#L3-1/2X3-1/2X1/4";
 
         // -----------------------------------------------------------------------
-        //  GENERATETOWER  – main command
-        //  Type this in the Advance Steel command line to run the plugin.
+        //  GENERATETOWER – type in the Advance Steel command line
         // -----------------------------------------------------------------------
         [CommandMethod("GENERATETOWER", CommandFlags.Modal)]
         public void GenerateTower()
         {
             var doc = AcadApp.DocumentManager.MdiActiveDocument;
             if (doc == null) return;
-
             var ed = doc.Editor;
 
             try
             {
-                ed.WriteMessage("\n[TowerGen] Starting tower generation...");
+                ed.WriteMessage("\n[TowerGen] Generating slanted lattice tower...");
+                ed.WriteMessage($"\n[TowerGen] Base: {BaseWidth} x {BaseWidth} mm");
+                ed.WriteMessage($"\n[TowerGen] Top : {TopWidth}  x {TopWidth}  mm");
+                ed.WriteMessage($"\n[TowerGen] H   : {Height} mm");
                 ed.WriteMessage($"\n[TowerGen] Profile: {AngleProfile}");
 
-                // Must lock the AS document before creating objects
                 DocumentManager.LockCurrentDocument();
 
-                // Open an Advance Steel write transaction
                 using (var steelTr = TransactionManager.StartTransaction())
                 {
                     // ----------------------------------------------------------
-                    //  Four corner XY positions (Z = 0 at this stage)
+                    //  Corner points
                     //
-                    //   C3 (0, Depth)  ─────  C4 (Width, Depth)
-                    //       │                       │
-                    //   C1 (0, 0)      ─────  C2 (Width, 0)
+                    //  Base (Z=0) – labelled B1..B4 going round the square:
+                    //    B1 = (-BaseHalf, -BaseHalf, 0)   front-left
+                    //    B2 = (+BaseHalf, -BaseHalf, 0)   front-right
+                    //    B3 = (+BaseHalf, +BaseHalf, 0)   back-right
+                    //    B4 = (-BaseHalf, +BaseHalf, 0)   back-left
+                    //
+                    //  Top (Z=Height) – labelled T1..T4, same order, inset:
+                    //    T1 = (-TopHalf,  -TopHalf,  H)   front-left
+                    //    T2 = (+TopHalf,  -TopHalf,  H)   front-right
+                    //    T3 = (+TopHalf,  +TopHalf,  H)   back-right
+                    //    T4 = (-TopHalf,  +TopHalf,  H)   back-left
+                    //
+                    //  Each base corner maps to the nearest top corner (same
+                    //  quadrant), so the legs splay inward as they rise.
                     // ----------------------------------------------------------
-                    var c1 = new ASPoint3d(0,     0,     0);
-                    var c2 = new ASPoint3d(Width, 0,     0);
-                    var c3 = new ASPoint3d(0,     Depth, 0);
-                    var c4 = new ASPoint3d(Width, Depth, 0);
+                    var B1 = new ASPoint3d(-BaseHalf, -BaseHalf, 0);
+                    var B2 = new ASPoint3d( BaseHalf, -BaseHalf, 0);
+                    var B3 = new ASPoint3d( BaseHalf,  BaseHalf, 0);
+                    var B4 = new ASPoint3d(-BaseHalf,  BaseHalf, 0);
+
+                    var T1 = new ASPoint3d(-TopHalf, -TopHalf, Height);
+                    var T2 = new ASPoint3d( TopHalf, -TopHalf, Height);
+                    var T3 = new ASPoint3d( TopHalf,  TopHalf, Height);
+                    var T4 = new ASPoint3d(-TopHalf,  TopHalf, Height);
 
                     // ----------------------------------------------------------
-                    //  1. Four vertical corner legs  (Z = 0 → Z = TotalHeight)
-                    //     NO bottom frame – legs are free / independent at Z = 0
+                    //  1. Four slanted corner legs
+                    //     Each leg: base corner → corresponding top corner
+                    //     (same quadrant → tower tapers inward)
                     // ----------------------------------------------------------
-                    ed.WriteMessage("\n[TowerGen] Creating 4 vertical legs...");
-                    CreateVerticalLeg(c1, TotalHeight);
-                    CreateVerticalLeg(c2, TotalHeight);
-                    CreateVerticalLeg(c3, TotalHeight);
-                    CreateVerticalLeg(c4, TotalHeight);
+                    ed.WriteMessage("\n[TowerGen] Creating 4 slanted corner legs...");
+                    CreateBeam(B1, T1);   // front-left  leg
+                    CreateBeam(B2, T2);   // front-right leg
+                    CreateBeam(B3, T3);   // back-right  leg
+                    CreateBeam(B4, T4);   // back-left   leg
 
                     // ----------------------------------------------------------
-                    //  2. Middle rectangular frame  (Z = MidElevation = 1200 mm)
+                    //  4. X-bracing on each of the 4 faces
+                    //
+                    //  Each face is a trapezoid (wider at base, narrower at top).
+                    //  Two crossing diagonals form the X visible in the images:
+                    //    diagonal A: base-left-corner  → top-right-corner of face
+                    //    diagonal B: base-right-corner → top-left-corner  of face
+                    //
+                    //  Face front  (Y = -BaseHalf / -TopHalf):  B1-B2 / T1-T2
+                    //  Face right  (X = +BaseHalf / +TopHalf):  B2-B3 / T2-T3
+                    //  Face back   (Y = +BaseHalf / +TopHalf):  B3-B4 / T3-T4
+                    //  Face left   (X = -BaseHalf / -TopHalf):  B4-B1 / T4-T1
                     // ----------------------------------------------------------
-                    ed.WriteMessage("\n[TowerGen] Creating middle frame at Z=" + MidElevation + "...");
-                    CreateFrameLevel(c1, c2, c3, c4, MidElevation);
+                    ed.WriteMessage("\n[TowerGen] Creating X-bracing on 4 faces...");
 
-                    // ----------------------------------------------------------
-                    //  3. Top rectangular frame  (Z = TotalHeight = 3000 mm)
-                    // ----------------------------------------------------------
-                    ed.WriteMessage("\n[TowerGen] Creating top frame at Z=" + TotalHeight + "...");
-                    CreateFrameLevel(c1, c2, c3, c4, TotalHeight);
+                    // Front face  (B1-B2 bottom, T1-T2 top)
+                    CreateBeam(B1, T2);   // diagonal: front-left-base  → front-right-top
+                    CreateBeam(B2, T1);   // diagonal: front-right-base → front-left-top
 
-                    // Commit – writes all 12 beams to the model database
+                    // Right face  (B2-B3 bottom, T2-T3 top)
+                    CreateBeam(B2, T3);
+                    CreateBeam(B3, T2);
+
+                    // Back face   (B3-B4 bottom, T3-T4 top)
+                    CreateBeam(B3, T4);
+                    CreateBeam(B4, T3);
+
+                    // Left face   (B4-B1 bottom, T4-T1 top)
+                    CreateBeam(B4, T1);
+                    CreateBeam(B1, T4);
+
                     steelTr.Commit();
                 }
 
                 DocumentManager.UnlockCurrentDocument();
 
-                // Force a model regeneration so members appear in the viewport
                 doc.Database.UpdateExt(true);
                 ed.Regen();
 
-                ed.WriteMessage("\n[TowerGen] Done. Tower generated successfully.");
-                ed.WriteMessage("\n[TowerGen] Members created: 4 legs + 4 middle + 4 top = 12 total.");
+                ed.WriteMessage("\n[TowerGen] Done.");
+                ed.WriteMessage("\n[TowerGen] Members: 4 legs + 4 top + 4 base + 8 X-braces = 20 total.");
             }
             catch (System.Exception ex)
             {
-                // Always unlock on failure to avoid leaving the document locked
                 try { DocumentManager.UnlockCurrentDocument(); } catch { }
-
                 ed.WriteMessage($"\n[TowerGen] ERROR: {ex.Message}");
                 ed.WriteMessage($"\n[TowerGen] {ex.StackTrace}");
             }
         }
 
         // -----------------------------------------------------------------------
-        //  CreateVerticalLeg
+        //  CreateBeam
+        //  Creates one StraightBeam between two points using the L-angle profile.
         //
-        //  Creates a single vertical L-angle from (x, y, 0) to (x, y, height).
-        //  Beam axis is along Z → use global X-axis as the vUp orientation vector.
+        //  vUp selection:
+        //    - If the beam is nearly vertical (axis close to Z), use global X.
+        //    - Otherwise use global Z.
+        //  This gives correct cross-section orientation for both legs and braces.
         // -----------------------------------------------------------------------
-        private static void CreateVerticalLeg(ASPoint3d baseXY, double height)
+        private static void CreateBeam(ASPoint3d startPt, ASPoint3d endPt)
         {
-            var ptBottom = new ASPoint3d(baseXY.x, baseXY.y, 0);
-            var ptTop    = new ASPoint3d(baseXY.x, baseXY.y, height);
+            double dx = endPt.x - startPt.x;
+            double dy = endPt.y - startPt.y;
+            double dz = endPt.z - startPt.z;
+            double len = System.Math.Sqrt(dx * dx + dy * dy + dz * dz);
 
-            CreateAngleBeam(ptBottom, ptTop, ASVector3d.kXAxis);
-        }
+            if (len < 1e-6) return;   // skip zero-length
 
-        // -----------------------------------------------------------------------
-        //  CreateFrameLevel
-        //
-        //  Creates four L-angle beams forming a closed rectangle at 'elevation'.
-        //
-        //  Plan view:
-        //    p3 ─── p4
-        //    │       │
-        //    p1 ─── p2
-        //
-        //  Beam axis is horizontal (in XY plane) → use global Z-axis as vUp.
-        // -----------------------------------------------------------------------
-        private static void CreateFrameLevel(
-            ASPoint3d c1, ASPoint3d c2,
-            ASPoint3d c3, ASPoint3d c4,
-            double elevation)
-        {
-            var p1 = new ASPoint3d(c1.x, c1.y, elevation);
-            var p2 = new ASPoint3d(c2.x, c2.y, elevation);
-            var p3 = new ASPoint3d(c3.x, c3.y, elevation);
-            var p4 = new ASPoint3d(c4.x, c4.y, elevation);
+            // Normalised Z component of the beam axis
+            double absNormZ = System.Math.Abs(dz / len);
 
-            var vUp = ASVector3d.kZAxis;   // orientation for horizontal members
-
-            CreateAngleBeam(p1, p2, vUp);  // front  (along X, Y = 0)
-            CreateAngleBeam(p3, p4, vUp);  // back   (along X, Y = Depth)
-            CreateAngleBeam(p1, p3, vUp);  // left   (along Y, X = 0)
-            CreateAngleBeam(p2, p4, vUp);  // right  (along Y, X = Width)
-        }
-
-        // -----------------------------------------------------------------------
-        //  CreateAngleBeam
-        //
-        //  Core helper – instantiates one StraightBeam and writes it to the
-        //  Advance Steel model database.
-        //
-        //  StraightBeam(string profileKey, Point3d start, Point3d end, Vector3d vUp)
-        //    profileKey  →  "TableName#@§@#SectionSize"
-        //    vUp         →  cross-section orientation reference vector
-        // -----------------------------------------------------------------------
-        private static void CreateAngleBeam(
-            ASPoint3d  startPt,
-            ASPoint3d  endPt,
-            ASVector3d vUp)
-        {
-            if (endPt.DistanceTo(startPt) < 1e-6) return;  // skip zero-length
+            // If beam is more than 70 % vertical, use X-axis as vUp
+            // otherwise use Z-axis as vUp
+            ASVector3d vUp = absNormZ > 0.7
+                ? ASVector3d.kXAxis
+                : ASVector3d.kZAxis;
 
             var beam = new StraightBeam(AngleProfile, startPt, endPt, vUp);
             beam.WriteToDb();

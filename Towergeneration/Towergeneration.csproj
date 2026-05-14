@@ -12,34 +12,29 @@
     <NoWarn>1591;8618</NoWarn>
   </PropertyGroup>
 
-  <!-- AutoCAD .NET NuGet (acmgd, acdbmgd, accoremgd) -->
+  <!-- AutoCAD .NET NuGet -->
   <ItemGroup>
     <PackageReference Include="AutoCAD.NET" Version="25.1.0" />
   </ItemGroup>
 
-  <!-- Advance Steel managed API – local references, do NOT copy to output -->
+  <!-- Advance Steel managed API – not copied to output (AS loads them at runtime) -->
   <ItemGroup>
-    <!-- Core AS managed API: TransactionManager, DocumentManager -->
     <Reference Include="ASMgd">
       <HintPath>C:\Program Files\Autodesk\AutoCAD 2026\ADVS\ASMgd.dll</HintPath>
       <Private>false</Private>
     </Reference>
-    <!-- AS object model: StraightBeam, BentBeam, etc. -->
     <Reference Include="ASObjectsMgd">
       <HintPath>C:\Program Files\Autodesk\AutoCAD 2026\ADVS\ASObjectsMgd.dll</HintPath>
       <Private>false</Private>
     </Reference>
-    <!-- AS geometry: Point3d, Vector3d, Matrix3d -->
     <Reference Include="ASGeometryMgd">
       <HintPath>C:\Program Files\Autodesk\AutoCAD 2026\ADVS\ASGeometryMgd.dll</HintPath>
       <Private>false</Private>
     </Reference>
-    <!-- AS CAD link: database access helpers -->
     <Reference Include="ASCADLinkMgd">
       <HintPath>C:\Program Files\Autodesk\AutoCAD 2026\ADVS\ASCADLinkMgd.dll</HintPath>
       <Private>false</Private>
     </Reference>
-    <!-- AS profiles: ProfilesManager, section lookup -->
     <Reference Include="ASProfilesMgd">
       <HintPath>C:\Program Files\Autodesk\AutoCAD 2026\ADVS\ASProfilesMgd.dll</HintPath>
       <Private>false</Private>
