@@ -73,7 +73,7 @@ namespace Towergeneration
         //  Sourced directly from AstorProfiles.mdf (USA, AISC 15.0 equal angles).
         // -----------------------------------------------------------------------
         private const string AngleProfile =
-            "AISC 15.0 Angle identical#@§@#L3-1/2X3-1/2X1/4";
+            "L50x50x5";
 
         // -----------------------------------------------------------------------
         //  GENERATETOWER – type in the Advance Steel command line
