@@ -59,14 +59,16 @@ namespace Towergeneration
         //  Top  corners are at ±TopHalf  in X and Y at Z=Height.
         //  Each leg runs from a base corner diagonally up to the nearest top corner,
         //  so the tower tapers inward as it rises.
+        //
+        //  Note: These are now set from user input at command execution time.
         // -----------------------------------------------------------------------
-        private const double BaseWidth = 11875.0;   // base square side length
-        private const double TopWidth  =  8875.0;   // top  square side length
-        private const double Height    =  8550.0;   // vertical height
+        private double BaseWidth;   // base square side length (mm)
+        private double TopWidth;    // top  square side length (mm)
+        private double Height;      // vertical height (mm)
 
-        // Half-widths (tower is centred at origin)
-        private const double BaseHalf = BaseWidth / 2.0;   // 5937.5
-        private const double TopHalf  = TopWidth  / 2.0;   // 4437.5
+        // Half-widths (tower is centred at origin) – computed from dimensions
+        private double BaseHalf;    // BaseWidth / 2.0
+        private double TopHalf;     // TopWidth / 2.0
 
         // -----------------------------------------------------------------------
         //  Profile key – two-part format: "RunName#@§@#SectionName"
@@ -87,6 +89,13 @@ namespace Towergeneration
 
             try
             {
+                // Prompt user for tower dimensions
+                if (!PromptForDimensions(ed))
+                {
+                    ed.WriteMessage("\n[TowerGen] Tower generation cancelled.");
+                    return;
+                }
+
                 ed.WriteMessage("\n[TowerGen] Generating slanted lattice tower...");
                 ed.WriteMessage($"\n[TowerGen] Base: {BaseWidth} x {BaseWidth} mm");
                 ed.WriteMessage($"\n[TowerGen] Top : {TopWidth}  x {TopWidth}  mm");
@@ -216,6 +225,59 @@ namespace Towergeneration
         }
 
         // -----------------------------------------------------------------------
+        //  PromptForDimensions
+        //  Prompts the user for base width, top width, and vertical height.
+        //  Returns true if all inputs are valid, false if cancelled.
+        // -----------------------------------------------------------------------
+        private bool PromptForDimensions(Autodesk.AutoCAD.EditorInput.Editor ed)
+        {
+            // Prompt for base width (default 11875 mm)
+            var baseWidthOpts = new Autodesk.AutoCAD.EditorInput.PromptDoubleOptions(
+                "\nEnter base width (mm) <11875.0>: ");
+            baseWidthOpts.DefaultValue = 11875.0;
+            baseWidthOpts.AllowNone = false;
+            baseWidthOpts.AllowNegative = false;
+            baseWidthOpts.AllowZero = false;
+
+            var baseWidthResult = ed.GetDouble(baseWidthOpts);
+            if (baseWidthResult.Status != Autodesk.AutoCAD.EditorInput.PromptStatus.OK)
+                return false;
+            BaseWidth = baseWidthResult.Value;
+
+            // Prompt for top width (default 8875 mm)
+            var topWidthOpts = new Autodesk.AutoCAD.EditorInput.PromptDoubleOptions(
+                "\nEnter top width (mm) <8875.0>: ");
+            topWidthOpts.DefaultValue = 8875.0;
+            topWidthOpts.AllowNone = false;
+            topWidthOpts.AllowNegative = false;
+            topWidthOpts.AllowZero = false;
+
+            var topWidthResult = ed.GetDouble(topWidthOpts);
+            if (topWidthResult.Status != Autodesk.AutoCAD.EditorInput.PromptStatus.OK)
+                return false;
+            TopWidth = topWidthResult.Value;
+
+            // Prompt for height (default 8550 mm)
+            var heightOpts = new Autodesk.AutoCAD.EditorInput.PromptDoubleOptions(
+                "\nEnter vertical height (mm) <8550.0>: ");
+            heightOpts.DefaultValue = 8550.0;
+            heightOpts.AllowNone = false;
+            heightOpts.AllowNegative = false;
+            heightOpts.AllowZero = false;
+
+            var heightResult = ed.GetDouble(heightOpts);
+            if (heightResult.Status != Autodesk.AutoCAD.EditorInput.PromptStatus.OK)
+                return false;
+            Height = heightResult.Value;
+
+            // Compute half-widths
+            BaseHalf = BaseWidth / 2.0;
+            TopHalf = TopWidth / 2.0;
+
+            return true;
+        }
+
+         // -----------------------------------------------------------------------
         //  AddFaceInternalBracing
         //
         //  Fills the two triangles formed by the X-diagonals on one face.
@@ -296,66 +358,66 @@ namespace Towergeneration
             BraceTriangle(TR, BR, X);
         }
 
-        // -----------------------------------------------------------------------
-        //  BraceTriangle
-        //
-        //  Adds internal members to one triangle.
-        //    topCorner  = apex (top of the leg side)
-        //    baseCorner = base of the leg side
-        //    cross      = X-crossing point (opposite vertex)
-        //
-        //  Leg nodes   L[1..5] at t = 1/6 … 5/6 from topCorner toward baseCorner
-        //  Upper nodes U[1..2] at t = 1/3, 2/3  from topCorner toward cross
-        //  Lower nodes Lo[1..3] at t = 1/4, 2/4, 3/4 from baseCorner toward cross
-        //
-        //  Members:
-        //    L[1]  → U[1]
-        //    L[2]  → U[1]
-        //    L[3]  → U[2]
-        //    L[3]  → Lo[1]
-        //    L[4]  → Lo[2]
-        //    L[5]  → Lo[3]
-        // -----------------------------------------------------------------------
-        private static void BraceTriangle(
-            ASPoint3d topCorner,
-            ASPoint3d baseCorner,
-            ASPoint3d cross)
-        {
-            // Leg nodes (from top corner toward base corner)
-            var L = new ASPoint3d[6];   // index 1..5 used
-            for (int i = 1; i <= 5; i++)
-                L[i] = Lerp(topCorner, baseCorner, i / 6.0);
+         // -----------------------------------------------------------------------
+         //  BraceTriangle
+         //
+         //  Adds internal members to one triangle.
+         //    topCorner  = apex (top of the leg side)
+         //    baseCorner = base of the leg side
+         //    cross      = X-crossing point (opposite vertex)
+         //
+         //  Leg nodes   L[1..5] at t = 1/6 … 5/6 from topCorner toward baseCorner
+         //  Upper nodes U[1..2] at t = 1/3, 2/3  from topCorner toward cross
+         //  Lower nodes Lo[1..3] at t = 1/4, 2/4, 3/4 from baseCorner toward cross
+         //
+         //  Members:
+         //    L[1]  → U[1]
+         //    L[2]  → U[1]
+         //    L[3]  → U[2]
+         //    L[3]  → Lo[1]
+         //    L[4]  → Lo[2]
+         //    L[5]  → Lo[3]
+         // -----------------------------------------------------------------------
+         private static void BraceTriangle(
+             ASPoint3d topCorner,
+             ASPoint3d baseCorner,
+             ASPoint3d cross)
+         {
+             // Leg nodes (from top corner toward base corner)
+             var L = new ASPoint3d[6];   // index 1..5 used
+             for (int i = 1; i <= 5; i++)
+                 L[i] = Lerp(topCorner, baseCorner, i / 6.0);
 
-            // Upper side nodes (from top corner toward X-crossing)
-            var U1 = Lerp(topCorner, cross, 1.0 / 3.0);
-            var U2 = Lerp(topCorner, cross, 2.0 / 3.0);
+             // Upper side nodes (from top corner toward X-crossing)
+             var U1 = Lerp(topCorner, cross, 1.0 / 3.0);
+             var U2 = Lerp(topCorner, cross, 2.0 / 3.0);
 
-            // Lower side nodes (from base corner toward X-crossing)
-            var Lo1 = Lerp(baseCorner, cross, 1.0 / 4.0);
-            var Lo2 = Lerp(baseCorner, cross, 2.0 / 4.0);
-            var Lo3 = Lerp(baseCorner, cross, 3.0 / 4.0);
+             // Lower side nodes (from base corner toward X-crossing)
+             var Lo1 = Lerp(baseCorner, cross, 1.0 / 4.0);
+             var Lo2 = Lerp(baseCorner, cross, 2.0 / 4.0);
+             var Lo3 = Lerp(baseCorner, cross, 3.0 / 4.0);
 
-            // Internal members
-            CreateBeam(L[1], U1);
-            CreateBeam(L[2], U1);
-            CreateBeam(L[3], U2);
-            CreateBeam(L[3], Lo3);
-            CreateBeam(L[4], Lo2);
-            CreateBeam(L[4], Lo1);
-            CreateBeam(L[5], Lo1);
-            CreateBeam(U2,   Lo3);   // upper[2] → lower[3]
+             // Internal members
+             CreateBeam(L[1], U1);
+             CreateBeam(L[2], U1);
+             CreateBeam(L[3], U2);
+             CreateBeam(L[3], Lo3);
+             CreateBeam(L[4], Lo2);
+             CreateBeam(L[4], Lo1);
+             CreateBeam(L[5], Lo1);
+             CreateBeam(U2,   Lo3);   // upper[2] → lower[3]
 
-            // Midpoint reference nodes (whole members stay intact – coords only)
-            // M_upper = midpoint along L[3]→U2
-            var M_upper = Lerp(L[3], U2, 0.5);
-            CreateBeam(L[2],    M_upper);   // L[2]  → mid(L3-U2)
-            CreateBeam(U1,      M_upper);   // U1    → mid(L3-U2)
+             // Midpoint reference nodes (whole members stay intact – coords only)
+             // M_upper = midpoint along L[3]→U2
+             var M_upper = Lerp(L[3], U2, 0.5);
+             CreateBeam(L[2],    M_upper);   // L[2]  → mid(L3-U2)
+             CreateBeam(U1,      M_upper);   // U1    → mid(L3-U2)
 
-            // M_lower = midpoint along L[3]→Lo3
-            var M_lower = Lerp(L[3], Lo3, 0.5);
-            CreateBeam(L[4],    M_lower);   // L[4]  → mid(L3-Lo3)
-            CreateBeam(Lo2,     M_lower);   // Lo2   → mid(L3-Lo2)
-        }
+             // M_lower = midpoint along L[3]→Lo3
+             var M_lower = Lerp(L[3], Lo3, 0.5);
+             CreateBeam(L[4],    M_lower);   // L[4]  → mid(L3-Lo3)
+             CreateBeam(Lo2,     M_lower);   // Lo2   → mid(L3-Lo2)
+         }
 
         // -----------------------------------------------------------------------
         //  Lerp – linear interpolation between two ASPoint3d values
