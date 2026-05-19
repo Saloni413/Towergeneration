@@ -62,13 +62,25 @@ namespace Towergeneration
         //
         //  Note: These are now set from user input at command execution time.
         // -----------------------------------------------------------------------
-        private double BaseWidth;   // base square side length (mm)
-        private double TopWidth;    // top  square side length (mm)
-        private double Height;      // vertical height (mm)
+        private double BaseWidth;   // base square side length (mm) - Section 1
+        private double TopWidth;    // top  square side length (mm) - Section 1
+        private double Height;      // vertical height (mm) - Section 1
 
         // Half-widths (tower is centred at origin) – computed from dimensions
-        private double BaseHalf;    // BaseWidth / 2.0
-        private double TopHalf;     // TopWidth / 2.0
+        private double BaseHalf;    // BaseWidth / 2.0 - Section 1
+        private double TopHalf;     // TopWidth / 2.0 - Section 1
+
+        // -----------------------------------------------------------------------
+        //  Second section dimensions (fixed values)
+        //  Section 2: Base width = TopWidth of Section 1, Top width = 6648, Height = 6100
+        // -----------------------------------------------------------------------
+        private const double BaseWidth2 = 8875.0;   // equals TopWidth of Section 1
+        private const double TopWidth2 = 6648.0;
+        private const double Height2 = 6100.0;
+
+        // Half-widths for Section 2
+        private const double BaseHalf2 = BaseWidth2 / 2.0;   // 4437.5
+        private const double TopHalf2 = TopWidth2 / 2.0;     // 3324.0
 
         // -----------------------------------------------------------------------
         //  Profile key – two-part format: "RunName#@§@#SectionName"
@@ -133,6 +145,32 @@ namespace Towergeneration
                     var T2 = new ASPoint3d( TopHalf, -TopHalf, Height);
                     var T3 = new ASPoint3d( TopHalf,  TopHalf, Height);
                     var T4 = new ASPoint3d(-TopHalf,  TopHalf, Height);
+
+                    // ----------------------------------------------------------
+                    //  SECTION 2 - Upper leg section
+                    //  Corner points for Section 2 (starting at Z = Height, ends at Z = Height + Height2)
+                    //
+                    //  Base (Z=Height) – equals Top of Section 1:
+                    //    B1_2 = (-BaseHalf2, -BaseHalf2, Height)   front-left
+                    //    B2_2 = (+BaseHalf2, -BaseHalf2, Height)   front-right
+                    //    B3_2 = (+BaseHalf2, +BaseHalf2, Height)   back-right
+                    //    B4_2 = (-BaseHalf2, +BaseHalf2, Height)   back-left
+                    //
+                    //  Top (Z=Height+Height2) – labelled T1_2..T4_2, inset further:
+                    //    T1_2 = (-TopHalf2, -TopHalf2, Height+Height2)   front-left
+                    //    T2_2 = (+TopHalf2, -TopHalf2, Height+Height2)   front-right
+                    //    T3_2 = (+TopHalf2, +TopHalf2, Height+Height2)   back-right
+                    //    T4_2 = (-TopHalf2, +TopHalf2, Height+Height2)   back-left
+                    // ----------------------------------------------------------
+                    var B1_2 = new ASPoint3d(-BaseHalf2, -BaseHalf2, Height);
+                    var B2_2 = new ASPoint3d( BaseHalf2, -BaseHalf2, Height);
+                    var B3_2 = new ASPoint3d( BaseHalf2,  BaseHalf2, Height);
+                    var B4_2 = new ASPoint3d(-BaseHalf2,  BaseHalf2, Height);
+
+                    var T1_2 = new ASPoint3d(-TopHalf2, -TopHalf2, Height + Height2);
+                    var T2_2 = new ASPoint3d( TopHalf2, -TopHalf2, Height + Height2);
+                    var T3_2 = new ASPoint3d( TopHalf2,  TopHalf2, Height + Height2);
+                    var T4_2 = new ASPoint3d(-TopHalf2,  TopHalf2, Height + Height2);
 
                     // ----------------------------------------------------------
                     //  1. Four slanted corner legs
@@ -205,6 +243,60 @@ namespace Towergeneration
 
                     // Left face
                     AddFaceInternalBracing(B4, T4, B1, T1);
+
+                    // ==============================================================
+                    //  SECTION 2 - UPPER LEG SECTION
+                    //  Creating tower section from top of Section 1 upward
+                    // ==============================================================
+
+                    // ----------------------------------------------------------
+                    //  2. Four slanted corner legs for Section 2
+                    //     Each leg: base_2 corner (= top of Section 1) → corresponding top_2 corner
+                    //     (same quadrant → tower tapers inward further)
+                    // ----------------------------------------------------------
+                    ed.WriteMessage("\n[TowerGen] Creating 4 corner legs for Section 2...");
+                    CreateBeam(B1_2, T1_2);   // front-left  leg
+                    CreateBeam(B2_2, T2_2);   // front-right leg
+                    CreateBeam(B3_2, T3_2);   // back-right  leg
+                    CreateBeam(B4_2, T4_2);   // back-left   leg
+
+                    // ----------------------------------------------------------
+                    //  X-bracing on Section 2 - each of the 4 faces
+                    // ----------------------------------------------------------
+                    ed.WriteMessage("\n[TowerGen] Creating X-bracing on 4 faces for Section 2...");
+
+                    // Front face  (B1_2-B2_2 bottom, T1_2-T2_2 top)
+                    CreateBeam(B1_2, T2_2);   // diagonal: front-left-base  → front-right-top
+                    CreateBeam(B2_2, T1_2);   // diagonal: front-right-base → front-left-top
+
+                    // Right face  (B2_2-B3_2 bottom, T2_2-T3_2 top)
+                    CreateBeam(B2_2, T3_2);
+                    CreateBeam(B3_2, T2_2);
+
+                    // Back face   (B3_2-B4_2 bottom, T3_2-T4_2 top)
+                    CreateBeam(B3_2, T4_2);
+                    CreateBeam(B4_2, T3_2);
+
+                    // Left face   (B4_2-B1_2 bottom, T4_2-T1_2 top)
+                    CreateBeam(B4_2, T1_2);
+                    CreateBeam(B1_2, T4_2);
+
+                    // ----------------------------------------------------------
+                    //  Internal bracing – fill each triangle on all 4 faces for Section 2
+                    // ----------------------------------------------------------
+                    ed.WriteMessage("\n[TowerGen] Adding internal bracing for Section 2...");
+
+                    // Front face
+                    AddFaceInternalBracing(B1_2, T1_2, B2_2, T2_2);
+
+                    // Right face
+                    AddFaceInternalBracing(B2_2, T2_2, B3_2, T3_2);
+
+                    // Back face
+                    AddFaceInternalBracing(B3_2, T3_2, B4_2, T4_2);
+
+                    // Left face
+                    AddFaceInternalBracing(B4_2, T4_2, B1_2, T1_2);
 
                     steelTr.Commit();
                 }
@@ -418,6 +510,8 @@ namespace Towergeneration
              CreateBeam(L[4],    M_lower);   // L[4]  → mid(L3-Lo3)
              CreateBeam(Lo2,     M_lower);   // Lo2   → mid(L3-Lo2)
          }
+
+        //section 2 internal bracing - different node distribution for upper leg section
 
         // -----------------------------------------------------------------------
         //  Lerp – linear interpolation between two ASPoint3d values
