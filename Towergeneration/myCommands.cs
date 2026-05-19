@@ -450,7 +450,7 @@ namespace Towergeneration
 
             // Normalised Z component of the beam axis
             double absNormZ = System.Math.Abs(dz / len);
-
+             
             // If beam is more than 70 % vertical, use X-axis as vUp
             // otherwise use Z-axis as vUp
             ASVector3d vUp = absNormZ > 0.7
