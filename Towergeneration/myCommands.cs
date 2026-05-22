@@ -25,9 +25,12 @@
 //      Leg[4] → Lower[2]
 //      Leg[5] → Lower[3]
 //
-//  Profile: L50x50x5 (AngleProfile)
-//  Commands: GENERATETOWER, GENERATELSECTION
+//  Profile: L50x50x5 (AngleProfile), PL6tx110 (PlateProfile)
+//  Commands: GENERATETOWER, GENERATELSECTION, GENERATEFROMJSON
 // =============================================================================
+
+using System.IO;
+using System.Text.Json;
 
 using Autodesk.AutoCAD.Runtime;
 
@@ -72,8 +75,91 @@ namespace Towergeneration
         //  Profile key – two-part format: "RunName#@§@#SectionName"
         //  Sourced directly from AstorProfiles.mdf (USA, AISC 15.0 equal angles).
         // -----------------------------------------------------------------------
-        private const string AngleProfile =
-            "L50x50x5";
+        private const string AngleProfile = "L50x50x5";
+        private const string PlateProfile = "PL6tx110";
+
+        private const string MembersJsonPath =
+            @"C:\Advanced POC\members_20260522_171605.json";
+
+        // -----------------------------------------------------------------------
+        //  GENERATEFROMJSON – all members from members JSON export
+        // -----------------------------------------------------------------------
+        [CommandMethod("GENERATEFROMJSON", CommandFlags.Modal)]
+        public void GenerateFromJson()
+        {
+            var doc = AcadApp.DocumentManager.MdiActiveDocument;
+            if (doc == null) return;
+            var ed = doc.Editor;
+
+            try
+            {
+                if (!File.Exists(MembersJsonPath))
+                {
+                    ed.WriteMessage($"\n[JsonGen] File not found: {MembersJsonPath}");
+                    return;
+                }
+
+                ed.WriteMessage($"\n[JsonGen] Reading {MembersJsonPath}...");
+                var jsonText = File.ReadAllText(MembersJsonPath);
+                var data = JsonSerializer.Deserialize<MembersJsonFile>(jsonText);
+                if (data?.Members == null || data.Members.Count == 0)
+                {
+                    ed.WriteMessage("\n[JsonGen] No members in JSON.");
+                    return;
+                }
+
+                ed.WriteMessage($"\n[JsonGen] Loaded {data.Members.Count} member(s).");
+                ed.WriteMessage($"\n[JsonGen] Angle profile: {AngleProfile}");
+                ed.WriteMessage($"\n[JsonGen] Plate profile: {PlateProfile}");
+
+                int angleCount = 0, plateCount = 0, skipped = 0;
+
+                DocumentManager.LockCurrentDocument();
+
+                using (var steelTr = TransactionManager.StartTransaction())
+                {
+                    foreach (var member in data.Members)
+                    {
+                        var startPt = new ASPoint3d(member.Xs, member.Ys, member.Zs);
+                        var endPt   = new ASPoint3d(member.Xe, member.Ye, member.Ze);
+                        var type = member.Type?.Trim() ?? "";
+
+                        if (type.Equals("Angle", System.StringComparison.OrdinalIgnoreCase))
+                        {
+                            CreateLinearMember(startPt, endPt, AngleProfile);
+                            angleCount++;
+                        }
+                        else if (type.Equals("Plate", System.StringComparison.OrdinalIgnoreCase))
+                        {
+                            CreateLinearMember(startPt, endPt, PlateProfile);
+                            plateCount++;
+                        }
+                        else
+                        {
+                            ed.WriteMessage(
+                                $"\n[JsonGen] Skipped mark {member.Mark}: unknown type '{member.Type}'.");
+                            skipped++;
+                        }
+                    }
+
+                    steelTr.Commit();
+                }
+
+                DocumentManager.UnlockCurrentDocument();
+
+                doc.Database.UpdateExt(true);
+                ed.Regen();
+
+                ed.WriteMessage(
+                    $"\n[JsonGen] Done. Angles: {angleCount}, Plates: {plateCount}, Skipped: {skipped}.");
+            }
+            catch (System.Exception ex)
+            {
+                try { DocumentManager.UnlockCurrentDocument(); } catch { }
+                ed.WriteMessage($"\n[JsonGen] ERROR: {ex.Message}");
+                ed.WriteMessage($"\n[JsonGen] {ex.StackTrace}");
+            }
+        }
 
         // -----------------------------------------------------------------------
         //  GENERATELSECTION – single L-angle between two 3D points
@@ -412,33 +498,34 @@ namespace Towergeneration
         }
 
         // -----------------------------------------------------------------------
-        //  CreateBeam
-        //  Creates one StraightBeam between two points using the L-angle profile.
-        //
-        //  vUp selection:
-        //    - If the beam is nearly vertical (axis close to Z), use global X.
-        //    - Otherwise use global Z.
-        //  This gives correct cross-section orientation for both legs and braces.
+        //  CreateBeam – tower / brace members (AngleProfile)
         // -----------------------------------------------------------------------
         private static void CreateBeam(ASPoint3d startPt, ASPoint3d endPt)
+            => CreateLinearMember(startPt, endPt, AngleProfile);
+
+        // -----------------------------------------------------------------------
+        //  CreateLinearMember
+        //  StraightBeam between two points (angle or plate profile from database).
+        //
+        //  vUp: X when axis is mostly vertical, else Z.
+        // -----------------------------------------------------------------------
+        private static void CreateLinearMember(
+            ASPoint3d startPt, ASPoint3d endPt, string profile)
         {
             double dx = endPt.x - startPt.x;
             double dy = endPt.y - startPt.y;
             double dz = endPt.z - startPt.z;
             double len = System.Math.Sqrt(dx * dx + dy * dy + dz * dz);
 
-            if (len < 1e-6) return;   // skip zero-length
+            if (len < 1e-6) return;
 
-            // Normalised Z component of the beam axis
             double absNormZ = System.Math.Abs(dz / len);
 
-            // If beam is more than 70 % vertical, use X-axis as vUp
-            // otherwise use Z-axis as vUp
             ASVector3d vUp = absNormZ > 0.7
                 ? ASVector3d.kXAxis
                 : ASVector3d.kZAxis;
 
-            var beam = new StraightBeam(AngleProfile, startPt, endPt, vUp);
+            var beam = new StraightBeam(profile, startPt, endPt, vUp);
             beam.WriteToDb();
         }
     }
