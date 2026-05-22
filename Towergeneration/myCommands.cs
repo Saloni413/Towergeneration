@@ -25,8 +25,8 @@
 //      Leg[4] → Lower[2]
 //      Leg[5] → Lower[3]
 //
-//  Profile: "AISC 15.0 Angle identical#@§@#L3-1/2X3-1/2X1/4"
-//  Command: GENERATETOWER
+//  Profile: L50x50x5 (AngleProfile)
+//  Commands: GENERATETOWER, GENERATELSECTION
 // =============================================================================
 
 using Autodesk.AutoCAD.Runtime;
@@ -74,6 +74,49 @@ namespace Towergeneration
         // -----------------------------------------------------------------------
         private const string AngleProfile =
             "L50x50x5";
+
+        // -----------------------------------------------------------------------
+        //  GENERATELSECTION – single L-angle between two 3D points
+        // -----------------------------------------------------------------------
+        [CommandMethod("GENERATELSECTION", CommandFlags.Modal)]
+        public void GenerateLSection()
+        {
+            var doc = AcadApp.DocumentManager.MdiActiveDocument;
+            if (doc == null) return;
+            var ed = doc.Editor;
+
+            var startPt = new ASPoint3d(0, 0, 0);
+            var endPt   = new ASPoint3d(2000, 3150, 5570);
+
+            try
+            {
+                ed.WriteMessage("\n[LSection] Generating L-section...");
+                ed.WriteMessage($"\n[LSection] Start: ({startPt.x}, {startPt.y}, {startPt.z})");
+                ed.WriteMessage($"\n[LSection] End  : ({endPt.x}, {endPt.y}, {endPt.z})");
+                ed.WriteMessage($"\n[LSection] Profile: {AngleProfile}");
+
+                DocumentManager.LockCurrentDocument();
+
+                using (var steelTr = TransactionManager.StartTransaction())
+                {
+                    CreateBeam(startPt, endPt);
+                    steelTr.Commit();
+                }
+
+                DocumentManager.UnlockCurrentDocument();
+
+                doc.Database.UpdateExt(true);
+                ed.Regen();
+
+                ed.WriteMessage("\n[LSection] Done.");
+            }
+            catch (System.Exception ex)
+            {
+                try { DocumentManager.UnlockCurrentDocument(); } catch { }
+                ed.WriteMessage($"\n[LSection] ERROR: {ex.Message}");
+                ed.WriteMessage($"\n[LSection] {ex.StackTrace}");
+            }
+        }
 
         // -----------------------------------------------------------------------
         //  GENERATETOWER – type in the Advance Steel command line
