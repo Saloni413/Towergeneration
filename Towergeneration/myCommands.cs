@@ -76,7 +76,7 @@ namespace Towergeneration
         //  Sourced directly from AstorProfiles.mdf (USA, AISC 15.0 equal angles).
         // -----------------------------------------------------------------------
         private const string AngleProfile = "L50x50x5";
-        private const string PlateProfile = "PL6tx110";
+        private const string PlateProfile = "PL100x12";
 
         private const string MembersJsonPath =
             @"C:\Advanced POC\members_20260522_171605.json";
