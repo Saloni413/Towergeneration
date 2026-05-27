@@ -1,31 +1,18 @@
-﻿// =============================================================================
+// =============================================================================
 //  TowerGeneration – Advance Steel Plugin
-//  Slanted lattice tower – tapered square section, wider at base than top.
+//  Slanted lattice tower – 3 body sections stacked vertically.
 //
-//  Dimensions (mm):
-//    Base square  : 11875 x 11875  (Z = 0)
-//    Top  square  :  8875 x  8875  (Z = 8550)
-//    Height       :  8550
+//  Section 1 (BOTTOM BODY):  Base 11875 x 11875 -> Top  8875 x  8875,  H = 8550,  Z = 0
+//  Section 2 (MIDDLE BODY):  Base  8875 x  8875 -> Top  7296 x  7296,  H = 4500,  Z = 8550
+//  Section 3 (UPPER BODY):   Base  7296 x  7296 -> Top  5717 x  5717,  H = 4500,  Z = 13050
 //
-//  Structure per face (4 faces total):
-//    - 2 slanted corner legs  (base outer corner → top inner corner)
-//    - 2 cross diagonals (X-brace): base-left→top-right, base-right→top-left
-//    - Internal bracing inside each of the 2 triangles per face
+//  Per face (4 faces, all sections):
+//    - 4 slanted corner legs
+//    - 2 full-height X-brace diagonals per face
+//    - Horizontal ties at the X-crossing level, upper-half midpoint, lower-half midpoint
+//    - X-brace sub-diagonals within each half (upper and lower)
 //
-//  Internal bracing per triangle (nodes are reference points only – no splits):
-//    Outer leg side  : 5 nodes at t = 1/6, 2/6, 3/6, 4/6, 5/6  (from top corner)
-//    Inner upper side: 2 nodes at t = 1/3, 2/3                  (from top corner to X)
-//    Inner lower side: 3 nodes at t = 1/4, 2/4, 3/4             (from base corner to X)
-//
-//    Connectivity (leg node → side node):
-//      Leg[1] → Upper[1]
-//      Leg[2] → Upper[1]
-//      Leg[3] → Upper[2]
-//      Leg[3] → Lower[1]
-//      Leg[4] → Lower[2]
-//      Leg[5] → Lower[3]
-//
-//  Profile: L50x50x5 (AngleProfile), PL6tx110 (PlateProfile)
+//  Profile: L50x50x5 (AngleProfile), PL100x12 (PlateProfile)
 //  Commands: GENERATETOWER, GENERATELSECTION, GENERATEFROMJSON
 // =============================================================================
 
@@ -55,21 +42,33 @@ namespace Towergeneration
     public class MyCommands
     {
         // -----------------------------------------------------------------------
-        //  Tower geometry (all mm)
+        //  Tower geometry (all mm) – three sections stacked vertically.
         //
-        //  The tower is centred at the world origin.
-        //  Base corners are at ±BaseHalf in X and Y at Z=0.
-        //  Top  corners are at ±TopHalf  in X and Y at Z=Height.
-        //  Each leg runs from a base corner diagonally up to the nearest top corner,
-        //  so the tower tapers inward as it rises.
+        //  Taper rate = (11875 - 8875) / 8550 ~ 0.3509 mm width per mm height.
+        //  Applied consistently so all sections share the same slope angle.
+        //
+        //  Section 1 (BOTTOM): Z   0 -> 8550,  base 11875 -> top  8875
+        //  Section 2 (MIDDLE): Z 8550 -> 13050, base  8875 -> top  7296
+        //  Section 3 (UPPER):  Z 13050 -> 17550, base  7296 -> top  5717
         // -----------------------------------------------------------------------
-        private const double BaseWidth = 11875.0;   // base square side length
-        private const double TopWidth  =  8875.0;   // top  square side length
-        private const double Height    =  8550.0;   // vertical height
 
-        // Half-widths (tower is centred at origin)
-        private const double BaseHalf = BaseWidth / 2.0;   // 5937.5
-        private const double TopHalf  = TopWidth  / 2.0;   // 4437.5
+        // Section 1
+        private const double S1_BaseWidth = 11875.0;
+        private const double S1_TopWidth  =  8875.0;
+        private const double S1_Height    =  8550.0;
+        private const double S1_ZOffset   =     0.0;
+
+        // Section 2 – base = section 1 top; same taper rate applied over 4500mm
+        private const double S2_BaseWidth = S1_TopWidth;           // 8875
+        private const double S2_TopWidth  = S1_TopWidth - (S1_BaseWidth - S1_TopWidth) / S1_Height * 4500.0; // ~7296
+        private const double S2_Height    = 4500.0;
+        private const double S2_ZOffset   = S1_Height;             // 8550
+
+        // Section 3 – base = section 2 top; same taper rate applied over 4500mm
+        private const double S3_BaseWidth = S2_TopWidth;           // ~7296
+        private const double S3_TopWidth  = S2_TopWidth - (S1_BaseWidth - S1_TopWidth) / S1_Height * 4500.0; // ~5717
+        private const double S3_Height    = 4500.0;
+        private const double S3_ZOffset   = S1_Height + S2_Height; // 13050
 
         // -----------------------------------------------------------------------
         //  Profile key – two-part format: "RunName#@§@#SectionName"
@@ -79,7 +78,7 @@ namespace Towergeneration
         private const string PlateProfile = "PL100x12";
 
         private const string MembersJsonPath =
-            @"C:\Advanced POC\members_20260522_171605.json";
+            @"C:\Users\Saloni Kumari\Downloads\tower_MERGED-001_extracted.json";
 
         // -----------------------------------------------------------------------
         //  GENERATEFROMJSON – all members from members JSON export
@@ -205,7 +204,7 @@ namespace Towergeneration
         }
 
         // -----------------------------------------------------------------------
-        //  GENERATETOWER – type in the Advance Steel command line
+        //  GENERATETOWER – generates 3 body sections stacked vertically
         // -----------------------------------------------------------------------
         [CommandMethod("GENERATETOWER", CommandFlags.Modal)]
         public void GenerateTower()
@@ -216,115 +215,24 @@ namespace Towergeneration
 
             try
             {
-                ed.WriteMessage("\n[TowerGen] Generating slanted lattice tower...");
-                ed.WriteMessage($"\n[TowerGen] Base: {BaseWidth} x {BaseWidth} mm");
-                ed.WriteMessage($"\n[TowerGen] Top : {TopWidth}  x {TopWidth}  mm");
-                ed.WriteMessage($"\n[TowerGen] H   : {Height} mm");
+                ed.WriteMessage("\n[TowerGen] Generating 3-section slanted lattice tower...");
                 ed.WriteMessage($"\n[TowerGen] Profile: {AngleProfile}");
 
                 DocumentManager.LockCurrentDocument();
 
                 using (var steelTr = TransactionManager.StartTransaction())
                 {
-                    // ----------------------------------------------------------
-                    //  Corner points
-                    //
-                    //  Base (Z=0) – labelled B1..B4 going round the square:
-                    //    B1 = (-BaseHalf, -BaseHalf, 0)   front-left
-                    //    B2 = (+BaseHalf, -BaseHalf, 0)   front-right
-                    //    B3 = (+BaseHalf, +BaseHalf, 0)   back-right
-                    //    B4 = (-BaseHalf, +BaseHalf, 0)   back-left
-                    //
-                    //  Top (Z=Height) – labelled T1..T4, same order, inset:
-                    //    T1 = (-TopHalf,  -TopHalf,  H)   front-left
-                    //    T2 = (+TopHalf,  -TopHalf,  H)   front-right
-                    //    T3 = (+TopHalf,  +TopHalf,  H)   back-right
-                    //    T4 = (-TopHalf,  +TopHalf,  H)   back-left
-                    //
-                    //  Each base corner maps to the nearest top corner (same
-                    //  quadrant), so the legs splay inward as they rise.
-                    // ----------------------------------------------------------
-                    var B1 = new ASPoint3d(-BaseHalf, -BaseHalf, 0);
-                    var B2 = new ASPoint3d( BaseHalf, -BaseHalf, 0);
-                    var B3 = new ASPoint3d( BaseHalf,  BaseHalf, 0);
-                    var B4 = new ASPoint3d(-BaseHalf,  BaseHalf, 0);
+                    // Section 1 – BOTTOM BODY: Z 0 -> 8550
+                    ed.WriteMessage($"\n[TowerGen] Section 1 (Bottom): base={S1_BaseWidth}, top={S1_TopWidth}, H={S1_Height}, Z={S1_ZOffset}");
+                    GenerateTowerBody(S1_BaseWidth, S1_TopWidth, S1_Height, S1_ZOffset);
 
-                    var T1 = new ASPoint3d(-TopHalf, -TopHalf, Height);
-                    var T2 = new ASPoint3d( TopHalf, -TopHalf, Height);
-                    var T3 = new ASPoint3d( TopHalf,  TopHalf, Height);
-                    var T4 = new ASPoint3d(-TopHalf,  TopHalf, Height);
+                    // Section 2 – MIDDLE BODY: Z 8550 -> 13050
+                    ed.WriteMessage($"\n[TowerGen] Section 2 (Middle): base={S2_BaseWidth:F0}, top={S2_TopWidth:F0}, H={S2_Height}, Z={S2_ZOffset}");
+                    GenerateTowerBody(S2_BaseWidth, S2_TopWidth, S2_Height, S2_ZOffset);
 
-                    // ----------------------------------------------------------
-                    //  1. Four slanted corner legs
-                    //     Each leg: base corner → corresponding top corner
-                    //     (same quadrant → tower tapers inward)
-                    // ----------------------------------------------------------
-                    ed.WriteMessage("\n[TowerGen] Creating 4 slanted corner legs...");
-                    CreateBeam(B1, T1);   // front-left  leg
-                    CreateBeam(B2, T2);   // front-right leg
-                    CreateBeam(B3, T3);   // back-right  leg
-                    CreateBeam(B4, T4);   // back-left   leg
-
-                    // ----------------------------------------------------------
-                    //  4. X-bracing on each of the 4 faces
-                    //
-                    //  Each face is a trapezoid (wider at base, narrower at top).
-                    //  Two crossing diagonals form the X visible in the images:
-                    //    diagonal A: base-left-corner  → top-right-corner of face
-                    //    diagonal B: base-right-corner → top-left-corner  of face
-                    //
-                    //  Face front  (Y = -BaseHalf / -TopHalf):  B1-B2 / T1-T2
-                    //  Face right  (X = +BaseHalf / +TopHalf):  B2-B3 / T2-T3
-                    //  Face back   (Y = +BaseHalf / +TopHalf):  B3-B4 / T3-T4
-                    //  Face left   (X = -BaseHalf / -TopHalf):  B4-B1 / T4-T1
-                    // ----------------------------------------------------------
-                    ed.WriteMessage("\n[TowerGen] Creating X-bracing on 4 faces...");
-
-                    // Front face  (B1-B2 bottom, T1-T2 top)
-                    CreateBeam(B1, T2);   // diagonal: front-left-base  → front-right-top
-                    CreateBeam(B2, T1);   // diagonal: front-right-base → front-left-top
-
-                    // Right face  (B2-B3 bottom, T2-T3 top)
-                    CreateBeam(B2, T3);
-                    CreateBeam(B3, T2);
-
-                    // Back face   (B3-B4 bottom, T3-T4 top)
-                    CreateBeam(B3, T4);
-                    CreateBeam(B4, T3);
-
-                    // Left face   (B4-B1 bottom, T4-T1 top)
-                    CreateBeam(B4, T1);
-                    CreateBeam(B1, T4);
-
-                    // ----------------------------------------------------------
-                    //  Internal bracing – fill each triangle on all 4 faces.
-                    //
-                    //  Each face has 2 triangles formed by the X-diagonals:
-                    //    Left  triangle : TL corner, BL corner, X-crossing point
-                    //    Right triangle : TR corner, BR corner, X-crossing point
-                    //
-                    //  AddTriangleBracing(apex, baseCorner, oppApex, oppBase)
-                    //    apex      = top corner of the triangle's leg side
-                    //    baseCorner= base corner of the triangle's leg side
-                    //    oppApex   = top corner of the opposite diagonal end
-                    //    oppBase   = base corner of the opposite diagonal end
-                    //  The X-crossing is computed as the intersection of the two
-                    //  diagonals (midpoint of the two diagonal midpoints for a
-                    //  planar trapezoid gives the exact crossing point).
-                    // ----------------------------------------------------------
-                    ed.WriteMessage("\n[TowerGen] Adding internal bracing...");
-
-                    // Front face  (B1=left-base, T1=left-top, B2=right-base, T2=right-top)
-                    AddFaceInternalBracing(B1, T1, B2, T2);
-
-                    // Right face
-                    AddFaceInternalBracing(B2, T2, B3, T3);
-
-                    // Back face
-                    AddFaceInternalBracing(B3, T3, B4, T4);
-
-                    // Left face
-                    AddFaceInternalBracing(B4, T4, B1, T1);
+                    // Section 3 – UPPER BODY: Z 13050 -> 17550
+                    ed.WriteMessage($"\n[TowerGen] Section 3 (Upper): base={S3_BaseWidth:F0}, top={S3_TopWidth:F0}, H={S3_Height}, Z={S3_ZOffset}");
+                    GenerateTowerBody(S3_BaseWidth, S3_TopWidth, S3_Height, S3_ZOffset);
 
                     steelTr.Commit();
                 }
@@ -334,7 +242,7 @@ namespace Towergeneration
                 doc.Database.UpdateExt(true);
                 ed.Regen();
 
-                ed.WriteMessage("\n[TowerGen] Done.");
+                ed.WriteMessage("\n[TowerGen] Done. Total height: " + (S1_Height + S2_Height + S3_Height) + " mm");
             }
             catch (System.Exception ex)
             {
@@ -345,145 +253,120 @@ namespace Towergeneration
         }
 
         // -----------------------------------------------------------------------
+        //  GenerateTowerBody – one tapered body section
+        //    baseWidth : square side length at the bottom of this section
+        //    topWidth  : square side length at the top  of this section
+        //    height    : vertical height of this section
+        //    zOffset   : Z coordinate of the bottom of this section
+        // -----------------------------------------------------------------------
+        private static void GenerateTowerBody(
+            double baseWidth, double topWidth, double height, double zOffset)
+        {
+            double bh = baseWidth / 2.0;
+            double th = topWidth  / 2.0;
+            double zT = zOffset + height;
+
+            // Base corners (at zOffset)
+            var B1 = new ASPoint3d(-bh, -bh, zOffset);
+            var B2 = new ASPoint3d( bh, -bh, zOffset);
+            var B3 = new ASPoint3d( bh,  bh, zOffset);
+            var B4 = new ASPoint3d(-bh,  bh, zOffset);
+
+            // Top corners (at zOffset + height)
+            var T1 = new ASPoint3d(-th, -th, zT);
+            var T2 = new ASPoint3d( th, -th, zT);
+            var T3 = new ASPoint3d( th,  th, zT);
+            var T4 = new ASPoint3d(-th,  th, zT);
+
+            // 4 slanted corner legs
+            CreateBeam(B1, T1);
+            CreateBeam(B2, T2);
+            CreateBeam(B3, T3);
+            CreateBeam(B4, T4);
+
+            // X-bracing on all 4 faces
+            CreateBeam(B1, T2); CreateBeam(B2, T1);   // front face
+            CreateBeam(B2, T3); CreateBeam(B3, T2);   // right face
+            CreateBeam(B3, T4); CreateBeam(B4, T3);   // back  face
+            CreateBeam(B4, T1); CreateBeam(B1, T4);   // left  face
+
+            // Internal bracing on all 4 faces
+            AddFaceInternalBracing(B1, T1, B2, T2);   // front face
+            AddFaceInternalBracing(B2, T2, B3, T3);   // right face
+            AddFaceInternalBracing(B3, T3, B4, T4);   // back  face
+            AddFaceInternalBracing(B4, T4, B1, T1);   // left  face
+        }
+
+        // -----------------------------------------------------------------------
         //  AddFaceInternalBracing
         //
-        //  Fills the two triangles formed by the X-diagonals on one face.
-        //  Parameters (left side and right side of the face):
-        //    BL = base-left corner,  TL = top-left corner   (left leg)
-        //    BR = base-right corner, TR = top-right corner  (right leg)
+        //  Adds structural sub-bracing to one trapezoidal face.
+        //  BL/TL = base/top of left leg,  BR/TR = base/top of right leg.
         //
-        //  The two diagonals are:  BL→TR  and  BR→TL
-        //  Their crossing point X is computed by linear interpolation.
+        //  Seven members per face:
+        //    1. Horizontal tie at the X-crossing level (LL -> RL)
+        //    2. Horizontal tie at mid of upper half    (ULL -> URL)
+        //    3. Upper sub-diagonal left-to-right       (ULL -> TR)
+        //    4. Upper sub-diagonal right-to-left       (URL -> TL)
+        //    5. Horizontal tie at mid of lower half    (LLL -> LRL)
+        //    6. Lower sub-diagonal left-to-right       (LLL -> RL)
+        //    7. Lower sub-diagonal right-to-left       (LRL -> LL)
         //
-        //  Left  triangle vertices : TL, BL, X   (leg = TL→BL, upper = TL→X, lower = BL→X)
-        //  Right triangle vertices : TR, BR, X   (leg = TR→BR, upper = TR→X, lower = BR→X)
-        //
-        //  Reference nodes (NOT physical splits – coordinates only):
-        //    Leg side   : 5 nodes at 1/6 … 5/6 from the TOP corner down to BASE
-        //    Upper side : 2 nodes at 1/3, 2/3  from the TOP corner toward X
-        //    Lower side : 3 nodes at 1/4, 2/4, 3/4 from the BASE corner toward X
-        //
-        //  Connectivity (leg node index → side node index, 1-based):
-        //    Leg[1] → Upper[1]
-        //    Leg[2] → Upper[1]
-        //    Leg[3] → Upper[2]
-        //    Leg[3] → Lower[1]
-        //    Leg[4] → Lower[2]
-        //    Leg[5] → Lower[3]
+        //  All nodes are on leg lines or at true intersection heights –
+        //  no midpoints of diagonal members are used.
         // -----------------------------------------------------------------------
         private static void AddFaceInternalBracing(
             ASPoint3d BL, ASPoint3d TL,
             ASPoint3d BR, ASPoint3d TR)
         {
-            // ------------------------------------------------------------------
-            //  Compute the X-crossing point of the two diagonals BL→TR and BR→TL.
-            //  For a planar trapezoid the crossing lies at the intersection of
-            //  the two diagonals.  We solve parametrically:
-            //    P = BL + s*(TR-BL) = BR + t*(TL-BR)
-            //  Solving for s in 3-D (over-determined; use the XY plane components
-            //  which are always non-degenerate for a non-degenerate face):
-            //
-            //    BL + s*(TR-BL) = BR + t*(TL-BR)
-            //    s*(TR-BL) - t*(TL-BR) = BR-BL
-            //
-            //  Two equations (x and y):
-            //    s*dAx - t*dBx = ex
-            //    s*dAy - t*dBy = ey
-            //  where dA = TR-BL, dB = TL-BR, e = BR-BL
-            // ------------------------------------------------------------------
-            double dAx = TR.x - BL.x,  dAy = TR.y - BL.y,  dAz = TR.z - BL.z;
-            double dBx = TL.x - BR.x,  dBy = TL.y - BR.y;
-            double ex  = BR.x - BL.x,  ey  = BR.y - BL.y;
+            // Compute X-crossing: solve BL + s*(TR-BL) = BR + t*(TL-BR) in XY
+            double dAx = TR.x - BL.x, dAy = TR.y - BL.y, dAz = TR.z - BL.z;
+            double dBx = TL.x - BR.x, dBy = TL.y - BR.y;
+            double ex  = BR.x - BL.x, ey  = BR.y - BL.y;
 
-            double det = dAx * (-dBy) - dAy * (-dBx);   // det of [dA | -dB] in XY
-            double s;
-            if (System.Math.Abs(det) > 1e-9)
-            {
-                s = (ex * (-dBy) - ey * (-dBx)) / det;
-            }
-            else
-            {
-                s = 0.5;   // fallback: midpoint (degenerate face)
-            }
+            double det = dAx * (-dBy) - dAy * (-dBx);
+            double s   = Math.Abs(det) > 1e-9
+                ? (ex * (-dBy) - ey * (-dBx)) / det
+                : 0.5;
 
-            var X = new ASPoint3d(
-                BL.x + s * dAx,
-                BL.y + s * dAy,
-                BL.z + s * dAz);
+            var Xcross = new ASPoint3d(BL.x + s * dAx, BL.y + s * dAy, BL.z + s * dAz);
 
-            // ------------------------------------------------------------------
-            //  Build reference nodes for each triangle.
-            //  Convention: leg nodes numbered from TOP corner downward (1..5).
-            //  Upper nodes numbered from TOP corner toward X (1..2).
-            //  Lower nodes numbered from BASE corner toward X (1..3).
-            // ------------------------------------------------------------------
+            // Leg nodes at the X-crossing height
+            var LL = LerpToZ(BL, TL, Xcross.z);   // left  leg at crossing Z
+            var RL = LerpToZ(BR, TR, Xcross.z);   // right leg at crossing Z
 
-            // ---- LEFT triangle  (leg: TL→BL,  upper: TL→X,  lower: BL→X) ----
-            BraceTriangle(TL, BL, X);
+            // 1. Horizontal tie at crossing level
+            CreateBeam(LL, RL);
 
-            // ---- RIGHT triangle (leg: TR→BR,  upper: TR→X,  lower: BR→X) ----
-            BraceTriangle(TR, BR, X);
+            // Upper half: between X-crossing level and top corners
+            var ULL = Lerp(LL, TL, 0.5);   // mid of left  leg, upper half
+            var URL = Lerp(RL, TR, 0.5);   // mid of right leg, upper half
+
+            // 2. Horizontal at mid of upper half
+            CreateBeam(ULL, URL);
+            // 3. & 4. X-brace sub-diagonals in upper half
+            CreateBeam(ULL, TR);
+            CreateBeam(URL, TL);
+
+            // Lower half: between base corners and X-crossing level
+            var LLL = Lerp(BL, LL, 0.5);   // mid of left  leg, lower half
+            var LRL = Lerp(BR, RL, 0.5);   // mid of right leg, lower half
+
+            // 5. Horizontal at mid of lower half
+            CreateBeam(LLL, LRL);
+            // 6. & 7. X-brace sub-diagonals in lower half
+            CreateBeam(LLL, RL);
+            CreateBeam(LRL, LL);
         }
 
         // -----------------------------------------------------------------------
-        //  BraceTriangle
-        //
-        //  Adds internal members to one triangle.
-        //    topCorner  = apex (top of the leg side)
-        //    baseCorner = base of the leg side
-        //    cross      = X-crossing point (opposite vertex)
-        //
-        //  Leg nodes   L[1..5] at t = 1/6 … 5/6 from topCorner toward baseCorner
-        //  Upper nodes U[1..2] at t = 1/3, 2/3  from topCorner toward cross
-        //  Lower nodes Lo[1..3] at t = 1/4, 2/4, 3/4 from baseCorner toward cross
-        //
-        //  Members:
-        //    L[1]  → U[1]
-        //    L[2]  → U[1]
-        //    L[3]  → U[2]
-        //    L[3]  → Lo[1]
-        //    L[4]  → Lo[2]
-        //    L[5]  → Lo[3]
+        //  LerpToZ – walk along line a->b until the given Z is reached
         // -----------------------------------------------------------------------
-        private static void BraceTriangle(
-            ASPoint3d topCorner,
-            ASPoint3d baseCorner,
-            ASPoint3d cross)
+        private static ASPoint3d LerpToZ(ASPoint3d a, ASPoint3d b, double targetZ)
         {
-            // Leg nodes (from top corner toward base corner)
-            var L = new ASPoint3d[6];   // index 1..5 used
-            for (int i = 1; i <= 5; i++)
-                L[i] = Lerp(topCorner, baseCorner, i / 6.0);
-
-            // Upper side nodes (from top corner toward X-crossing)
-            var U1 = Lerp(topCorner, cross, 1.0 / 3.0);
-            var U2 = Lerp(topCorner, cross, 2.0 / 3.0);
-
-            // Lower side nodes (from base corner toward X-crossing)
-            var Lo1 = Lerp(baseCorner, cross, 1.0 / 4.0);
-            var Lo2 = Lerp(baseCorner, cross, 2.0 / 4.0);
-            var Lo3 = Lerp(baseCorner, cross, 3.0 / 4.0);
-
-            // Internal members
-            CreateBeam(L[1], U1);
-            CreateBeam(L[2], U1);
-            CreateBeam(L[3], U2);
-            CreateBeam(L[3], Lo3);
-            CreateBeam(L[4], Lo2);
-            CreateBeam(L[4], Lo1);
-            CreateBeam(L[5], Lo1);
-            CreateBeam(U2,   Lo3);   // upper[2] → lower[3]
-
-            // Midpoint reference nodes (whole members stay intact – coords only)
-            // M_upper = midpoint along L[3]→U2
-            var M_upper = Lerp(L[3], U2, 0.5);
-            CreateBeam(L[2],    M_upper);   // L[2]  → mid(L3-U2)
-            CreateBeam(U1,      M_upper);   // U1    → mid(L3-U2)
-
-            // M_lower = midpoint along L[3]→Lo3
-            var M_lower = Lerp(L[3], Lo3, 0.5);
-            CreateBeam(L[4],    M_lower);   // L[4]  → mid(L3-Lo3)
-            CreateBeam(Lo2,     M_lower);   // Lo2   → mid(L3-Lo2)
+            double dz = b.z - a.z;
+            if (Math.Abs(dz) < 1e-9) return a;
+            return Lerp(a, b, (targetZ - a.z) / dz);
         }
 
         // -----------------------------------------------------------------------
@@ -515,11 +398,11 @@ namespace Towergeneration
             double dx = endPt.x - startPt.x;
             double dy = endPt.y - startPt.y;
             double dz = endPt.z - startPt.z;
-            double len = System.Math.Sqrt(dx * dx + dy * dy + dz * dz);
+            double len = Math.Sqrt(dx * dx + dy * dy + dz * dz);
 
             if (len < 1e-6) return;
 
-            double absNormZ = System.Math.Abs(dz / len);
+            double absNormZ = Math.Abs(dz / len);
 
             ASVector3d vUp = absNormZ > 0.7
                 ? ASVector3d.kXAxis
