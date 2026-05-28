@@ -20,6 +20,7 @@ using System.IO;
 using System.Text.Json;
 
 using Autodesk.AutoCAD.Runtime;
+using Newtonsoft.Json;
 
 // Advance Steel geometry – aliased to avoid conflict with AutoCAD types
 using ASPoint3d  = Autodesk.AdvanceSteel.Geometry.Point3d;
@@ -77,8 +78,8 @@ namespace Towergeneration
         private const string AngleProfile = "L50x50x5";
         private const string PlateProfile = "PL100x12";
 
-        private const string MembersJsonPath =
-            @"C:\Users\Saloni Kumari\Downloads\tower_MERGED-001_extracted.json";
+        private const string jsonPath =
+            @"C:\Users\Saloni Kumari\Downloads\test.json";
 
         // -----------------------------------------------------------------------
         //  GENERATEFROMJSON – all members from members JSON export
@@ -88,57 +89,84 @@ namespace Towergeneration
         {
             var doc = AcadApp.DocumentManager.MdiActiveDocument;
             if (doc == null) return;
+
             var ed = doc.Editor;
+
+            // JSON file path
+            //string jsonPath = @"C:\TowerData\members.json";
 
             try
             {
-                if (!File.Exists(MembersJsonPath))
+                if (!File.Exists(jsonPath))
                 {
-                    ed.WriteMessage($"\n[JsonGen] File not found: {MembersJsonPath}");
+                    ed.WriteMessage($"\nJSON file not found: {jsonPath}");
                     return;
                 }
 
-                ed.WriteMessage($"\n[JsonGen] Reading {MembersJsonPath}...");
-                var jsonText = File.ReadAllText(MembersJsonPath);
-                var data = JsonSerializer.Deserialize<MembersJsonFile>(jsonText);
-                if (data?.Members == null || data.Members.Count == 0)
+                // =========================
+                // Read JSON
+                // =========================
+                string json = File.ReadAllText(jsonPath);
+
+                TowerData towerData =
+                    JsonConvert.DeserializeObject<TowerData>(json);
+
+                if (towerData == null || towerData.Members == null)
                 {
-                    ed.WriteMessage("\n[JsonGen] No members in JSON.");
+                    ed.WriteMessage("\nNo member data found.");
                     return;
                 }
 
-                ed.WriteMessage($"\n[JsonGen] Loaded {data.Members.Count} member(s).");
-                ed.WriteMessage($"\n[JsonGen] Angle profile: {AngleProfile}");
-                ed.WriteMessage($"\n[JsonGen] Plate profile: {PlateProfile}");
+                ed.WriteMessage(
+                    $"\nProject: {towerData.ProjectName}"
+                );
 
-                int angleCount = 0, plateCount = 0, skipped = 0;
+                ed.WriteMessage(
+                    $"\nTotal Members: {towerData.Members.Count}"
+                );
 
                 DocumentManager.LockCurrentDocument();
 
-                using (var steelTr = TransactionManager.StartTransaction())
+                using (var steelTr =
+                       TransactionManager.StartTransaction())
                 {
-                    foreach (var member in data.Members)
+                    foreach (var member in towerData.Members)
                     {
-                        var startPt = new ASPoint3d(member.Xs, member.Ys, member.Zs);
-                        var endPt   = new ASPoint3d(member.Xe, member.Ye, member.Ze);
-                        var type = member.Type?.Trim() ?? "";
+                        // Only create Angle sections
+                        if (member.Type != "Angle")
+                            continue;
 
-                        if (type.Equals("Angle", System.StringComparison.OrdinalIgnoreCase))
-                        {
-                            CreateLinearMember(startPt, endPt, AngleProfile);
-                            angleCount++;
-                        }
-                        else if (type.Equals("Plate", System.StringComparison.OrdinalIgnoreCase))
-                        {
-                            CreateLinearMember(startPt, endPt, PlateProfile);
-                            plateCount++;
-                        }
-                        else
-                        {
-                            ed.WriteMessage(
-                                $"\n[JsonGen] Skipped mark {member.Mark}: unknown type '{member.Type}'.");
-                            skipped++;
-                        }
+                        // =========================
+                        // Create start/end points
+                        // =========================
+                        var startPt = new ASPoint3d(
+                            member.Xs,
+                            member.Ys,
+                            member.Zs
+                        );
+
+                        var endPt = new ASPoint3d(
+                            member.Xe,
+                            member.Ye,
+                            member.Ze
+                        );
+
+                        ed.WriteMessage(
+                            $"\nCreating Member: {member.Mark}"
+                        );
+
+                        ed.WriteMessage(
+                            $"\nType: {member.Type}"
+                        );
+
+                        ed.WriteMessage(
+                            $"\nSection: {member.Description}"
+                        );
+
+                        // =========================
+                        // Create beam
+                        // =========================
+                        CreateBeam(startPt, endPt);
                     }
 
                     steelTr.Commit();
@@ -149,14 +177,18 @@ namespace Towergeneration
                 doc.Database.UpdateExt(true);
                 ed.Regen();
 
-                ed.WriteMessage(
-                    $"\n[JsonGen] Done. Angles: {angleCount}, Plates: {plateCount}, Skipped: {skipped}.");
+                ed.WriteMessage("\nTower generation completed.");
             }
             catch (System.Exception ex)
             {
-                try { DocumentManager.UnlockCurrentDocument(); } catch { }
-                ed.WriteMessage($"\n[JsonGen] ERROR: {ex.Message}");
-                ed.WriteMessage($"\n[JsonGen] {ex.StackTrace}");
+                try
+                {
+                    DocumentManager.UnlockCurrentDocument();
+                }
+                catch { }
+
+                ed.WriteMessage($"\nERROR: {ex.Message}");
+                ed.WriteMessage($"\n{ex.StackTrace}");
             }
         }
 
@@ -168,23 +200,39 @@ namespace Towergeneration
         {
             var doc = AcadApp.DocumentManager.MdiActiveDocument;
             if (doc == null) return;
+
             var ed = doc.Editor;
 
-            var startPt = new ASPoint3d(0, 0, 0);
-            var endPt   = new ASPoint3d(2000, 3150, 5570);
+            // =========================
+            // Connected member data
+            // =========================
+            var members = new List<MemberLine>()
+            {
+                new MemberLine(0,    0,    0,   1000, 3000, 0),
+                new MemberLine(1000, 3000, 0,   2000, 3000, 0),
+                new MemberLine(2000, 3000, 0,   3000, 0, 0),
+                new MemberLine(3000, 0, 0,   0, 0,    0)
+            };
 
             try
             {
-                ed.WriteMessage("\n[LSection] Generating L-section...");
-                ed.WriteMessage($"\n[LSection] Start: ({startPt.x}, {startPt.y}, {startPt.z})");
-                ed.WriteMessage($"\n[LSection] End  : ({endPt.x}, {endPt.y}, {endPt.z})");
-                ed.WriteMessage($"\n[LSection] Profile: {AngleProfile}");
+                ed.WriteMessage("\n[LSection] Generating connected L-sections...");
 
                 DocumentManager.LockCurrentDocument();
 
                 using (var steelTr = TransactionManager.StartTransaction())
                 {
-                    CreateBeam(startPt, endPt);
+                    foreach (var member in members)
+                    {
+                        ed.WriteMessage(
+                            $"\n[LSection] Beam: " +
+                            $"({member.StartPoint.x}, {member.StartPoint.y}, {member.StartPoint.z}) -> " +
+                            $"({member.EndPoint.x}, {member.EndPoint.y}, {member.EndPoint.z})"
+                        );
+
+                        CreateBeam(member.StartPoint, member.EndPoint);
+                    }
+
                     steelTr.Commit();
                 }
 
@@ -198,6 +246,7 @@ namespace Towergeneration
             catch (System.Exception ex)
             {
                 try { DocumentManager.UnlockCurrentDocument(); } catch { }
+
                 ed.WriteMessage($"\n[LSection] ERROR: {ex.Message}");
                 ed.WriteMessage($"\n[LSection] {ex.StackTrace}");
             }

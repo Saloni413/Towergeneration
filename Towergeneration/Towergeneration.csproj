@@ -15,6 +15,7 @@
   <!-- AutoCAD .NET NuGet -->
   <ItemGroup>
     <PackageReference Include="AutoCAD.NET" Version="25.1.0" />
+    <PackageReference Include="Newtonsoft.Json" Version="13.0.4" />
   </ItemGroup>
 
   <!-- Advance Steel managed API – not copied to output (AS loads them at runtime) -->
