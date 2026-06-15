@@ -1,9 +1,4 @@
 ﻿using Autodesk.AutoCAD.Runtime;
-using System;
-using System.Collections.Generic;
-using System.Linq;
-using System.Text;
-using System.Threading.Tasks;
 
 namespace Towergeneration
 {
@@ -11,12 +6,14 @@ namespace Towergeneration
     {
         public void Initialize()
         {
-            // Add your initialization code here
+            var doc = Autodesk.AutoCAD.ApplicationServices.Application
+                          .DocumentManager.MdiActiveDocument;
+            doc?.Editor.WriteMessage(
+                "\nTowergeneration plugin loaded." +
+                "\n  GENERATEFROMJSON — build tower from JSON" +
+                "\n  GENERATEBOM      — number parts & generate BOM PDF");
         }
 
-        public void Terminate()
-        {
-            // Add your termination code here
-        }
+        public void Terminate() { }
     }
 }
