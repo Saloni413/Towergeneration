@@ -9,6 +9,9 @@ using Autodesk.AdvanceSteel.DocumentManagement;
 using Autodesk.AdvanceSteel.CADAccess;
 using Autodesk.AdvanceSteel.Modelling;
 using Newtonsoft.Json;
+using PdfSharp.Fonts;
+using PdfSharp.Pdf;
+using PdfSharp.Drawing;
 
 using WpfBrushes     = System.Windows.Media.Brushes;
 using WpfColor       = System.Windows.Media.Color;
@@ -43,25 +46,12 @@ namespace Towergeneration
         private const string AngleProfile = "L100x10";
 
         private const string JsonPath =
-            @"C:\08-06-2026 (Advance Steel)\tower_members_3d_manual.json";
-
-        private const double FaceWidth = 3000.0;
-        private const double HalfWidth = FaceWidth / 2.0;
+            @"C:\08-06-2026 (Advance Steel)\mirror.json";
 
         // L100x10 section: 15.1 kg/m  (EN 10056-1)
         private const double KgPerMetre = 15.1;
         private const string SectionGrade = "S355JR";
         private const string SectionDesc  = "L100X10";
-
-        // ── Geometry helpers ─────────────────────────────────────────────────────
-
-        private static ASPoint3d RotateAroundZ(ASPoint3d pt, double angle)
-        {
-            double cos = Math.Cos(angle), sin = Math.Sin(angle);
-            return new ASPoint3d(pt.x * cos - pt.y * sin,
-                                 pt.x * sin + pt.y * cos,
-                                 pt.z);
-        }
 
         // ── GENERATEFROMJSON ─────────────────────────────────────────────────────
 
@@ -327,6 +317,46 @@ namespace Towergeneration
             WpfGrid.SetColumn(metaBorder, 1);
             hdr.Children.Add(metaBorder);
 
+            // ── Save as PDF button ───────────────────────────────────────────────
+            var saveBtn = new System.Windows.Controls.Button
+            {
+                Content             = "Save as PDF",
+                Margin              = new Thickness(0, 0, 0, 8),
+                Padding             = new Thickness(14, 5, 14, 5),
+                HorizontalAlignment = System.Windows.HorizontalAlignment.Left,
+                Background          = new SolidColorBrush(WpfColor.FromRgb(0, 114, 178)),
+                Foreground          = WpfBrushes.White,
+                BorderThickness     = new Thickness(0),
+                FontWeight          = FontWeights.Bold,
+                FontSize            = 11
+            };
+            saveBtn.Click += (_, __) =>
+            {
+                var dlg = new Microsoft.Win32.SaveFileDialog
+                {
+                    Title            = "Save BOM as PDF",
+                    Filter           = "PDF Files (*.pdf)|*.pdf|All Files (*.*)|*.*",
+                    DefaultExt       = ".pdf",
+                    FileName         = "TowerBOM.pdf",
+                    InitialDirectory = Path.GetDirectoryName(JsonPath) ?? @"C:\"
+                };
+                if (dlg.ShowDialog() != true) return;
+                try
+                {
+                    WriteBomPdf(rows, dlg.FileName);
+                    System.Windows.MessageBox.Show(
+                        "BOM saved:\n" + dlg.FileName,
+                        "Saved", MessageBoxButton.OK, MessageBoxImage.Information);
+                }
+                catch (System.Exception ex)
+                {
+                    System.Windows.MessageBox.Show(
+                        "Failed to save PDF:\n" + ex.Message,
+                        "Error", MessageBoxButton.OK, MessageBoxImage.Error);
+                }
+            };
+            outer.Children.Add(saveBtn);
+
             outer.Children.Add(hdr);
 
             // ════════════════════════════════════════════════════════════════════
@@ -498,6 +528,193 @@ namespace Towergeneration
             };
         }
 
+        // ── WriteBomPdf ──────────────────────────────────────────────────────────
+        //  Generates a formatted A4-landscape PDF BOM using PdfSharp.
+        // -------------------------------------------------------------------------
+
+        private static void WriteBomPdf(List<BomRow> rows, string outputPath)
+        {
+            const double margin   = 36.0;
+            const double hdrH     = 56.0;
+            const double colHdrH  = 16.0;
+            const double dataRowH = 13.0;
+
+            (string hdr, double w, bool ra)[] cols =
+            {
+                ("Qty",           46, true ),
+                ("Mark",          50, false),
+                ("Description",  120, false),
+                ("Length\n(mm)",  72, true ),
+                ("Grade",         60, false),
+                ("Part Wt\n(kg)", 72, true ),
+                ("Total Wt\n(kg)",72, true ),
+                ("Remark",        72, false),
+            };
+            double tableW = cols.Sum(c => c.w);
+
+            if (GlobalFontSettings.FontResolver is not WinFontResolver)
+                GlobalFontSettings.FontResolver = new WinFontResolver();
+
+            using var doc = new PdfDocument();
+            doc.Info.Title  = "Bill of Materials";
+            doc.Info.Author = "Advance Steel Plugin";
+
+            var fTitle  = new XFont("Arial", 12, XFontStyleEx.Bold);
+            var fSub    = new XFont("Arial",  7, XFontStyleEx.Regular);
+            var fColHdr = new XFont("Arial",  7, XFontStyleEx.Bold);
+            var fCell   = new XFont("Arial",  7, XFontStyleEx.Regular);
+            var fBold   = new XFont("Arial",  7, XFontStyleEx.Bold);
+            var fSmall  = new XFont("Arial",  6, XFontStyleEx.Regular);
+
+            var penBlack = new XPen(XColors.Black, 0.4);
+            var penLight = new XPen(XColor.FromArgb(180, 180, 180), 0.3);
+            var brushHdr = new XSolidBrush(XColor.FromArgb(240, 240, 240));
+            var brushAlt = new XSolidBrush(XColor.FromArgb(245, 248, 252));
+            var brushTot = new XSolidBrush(XColor.FromArgb(230, 230, 230));
+            var fmtRight = new XStringFormat
+            {
+                Alignment     = XStringAlignment.Far,
+                LineAlignment = XLineAlignment.Near
+            };
+
+            string today  = DateTime.Now.ToString("d-MMM-yy");
+            int    totQty = rows.Sum(r => r.Quantity);
+            double totWt  = rows.Sum(r =>
+                double.TryParse(r.TotalWeight, out double w) ? w : 0.0);
+            int pageNum = 0;
+
+            PdfPage   page = doc.AddPage();
+            page.Width  = XUnit.FromMillimeter(297);   // A4 landscape
+            page.Height = XUnit.FromMillimeter(210);
+            XGraphics gfx = XGraphics.FromPdfPage(page);
+            pageNum++;
+            double y = margin;
+
+            // ── Header ───────────────────────────────────────────────────────────
+            const double logoW = 120.0;
+            gfx.DrawRectangle(penBlack, brushHdr, new XRect(margin, y, logoW, hdrH));
+            gfx.DrawString("AUTODESK®", fSub, XBrushes.Black,
+                           new XRect(margin + 4, y + 4, logoW - 8, 10), XStringFormats.TopLeft);
+            gfx.DrawString("ADVANCE STEEL", fTitle, XBrushes.Black,
+                           new XRect(margin + 3, y + 16, logoW - 6, 18), XStringFormats.TopLeft);
+
+            double ix = margin + logoW;
+            double iw = tableW - logoW;
+            double ir = hdrH / 4.0;
+
+            void InfoRow(int row, string lbl1, string val1, string lbl2, string val2)
+            {
+                double ry = y + row * ir;
+                double lw = 52, vw = iw / 2.0 - lw;
+                gfx.DrawRectangle(penLight, new XRect(ix,             ry, lw,              ir));
+                gfx.DrawString(lbl1, fSub, XBrushes.Black, new XRect(ix + 3,           ry + 2, lw - 5,              ir - 4), XStringFormats.TopLeft);
+                gfx.DrawRectangle(penLight, new XRect(ix + lw,        ry, vw,              ir));
+                gfx.DrawString(val1, fBold, XBrushes.Black, new XRect(ix + lw + 3,      ry + 2, vw - 5,              ir - 4), XStringFormats.TopLeft);
+                gfx.DrawRectangle(penLight, new XRect(ix + lw + vw,   ry, lw,              ir));
+                gfx.DrawString(lbl2, fSub, XBrushes.Black, new XRect(ix + lw + vw + 3,  ry + 2, lw - 5,              ir - 4), XStringFormats.TopLeft);
+                gfx.DrawRectangle(penLight, new XRect(ix + 2*lw + vw, ry, iw - 2*lw - vw, ir));
+                gfx.DrawString(val2, fBold, XBrushes.Black, new XRect(ix + 2*lw + vw + 3, ry + 2, iw - 2*lw - vw - 5, ir - 4), XStringFormats.TopLeft);
+            }
+
+            gfx.DrawRectangle(penLight, new XRect(ix, y, iw, ir));
+            gfx.DrawString("Company", fBold, XBrushes.Black,
+                           new XRect(ix + 4, y + 2, iw - 8, ir - 4), XStringFormats.TopLeft);
+            InfoRow(1, "Client :",   "", "Job No :", "");
+            InfoRow(2, "Project :",  "", "Date :",   today);
+            InfoRow(3, "Detailer :", "", "Units :",  "mm");
+            gfx.DrawRectangle(penBlack, new XRect(margin, y, tableW, hdrH));
+            y += hdrH + 2;
+
+            // ── Column headers ────────────────────────────────────────────────────
+            void DrawColHeaders()
+            {
+                double cx = margin;
+                foreach (var (h, w, _) in cols)
+                {
+                    gfx.DrawRectangle(penBlack, brushHdr, new XRect(cx, y, w, colHdrH));
+                    gfx.DrawString(h, fColHdr, XBrushes.Black,
+                                   new XRect(cx + 2, y + 1, w - 4, colHdrH - 2),
+                                   XStringFormats.Center);
+                    cx += w;
+                }
+                y += colHdrH;
+            }
+            DrawColHeaders();
+
+            // ── Data rows ─────────────────────────────────────────────────────────
+            const double reserveH = dataRowH * 2 + 18;
+            for (int i = 0; i < rows.Count; i++)
+            {
+                if (y + dataRowH > page.Height.Point - margin - reserveH)
+                {
+                    gfx.DrawString("Page " + pageNum, fSmall, XBrushes.Gray,
+                                   new XRect(margin, page.Height.Point - 22, tableW, 10),
+                                   fmtRight);
+                    gfx.Dispose();
+                    page        = doc.AddPage();
+                    page.Width  = XUnit.FromMillimeter(297);
+                    page.Height = XUnit.FromMillimeter(210);
+                    gfx         = XGraphics.FromPdfPage(page);
+                    pageNum++;
+                    y = margin;
+                    DrawColHeaders();
+                }
+
+                var r = rows[i];
+                if (i % 2 == 1)
+                    gfx.DrawRectangle(brushAlt, new XRect(margin, y, tableW, dataRowH));
+
+                string[] cells =
+                {
+                    r.Quantity.ToString(), r.Mark, r.Description,
+                    r.Length, r.Grade, r.PartWeight, r.TotalWeight, r.Remark
+                };
+                double cx = margin;
+                for (int c = 0; c < cells.Length; c++)
+                {
+                    gfx.DrawRectangle(penBlack, new XRect(cx, y, cols[c].w, dataRowH));
+                    gfx.DrawString(cells[c], c == 1 ? fBold : fCell, XBrushes.Black,
+                                   new XRect(cx + 2, y + 1, cols[c].w - 4, dataRowH - 2),
+                                   cols[c].ra ? fmtRight : XStringFormats.TopLeft);
+                    cx += cols[c].w;
+                }
+                y += dataRowH;
+            }
+
+            // ── Totals ────────────────────────────────────────────────────────────
+            y += 3;
+            double tLbl = cols[0].w + cols[1].w + cols[2].w;
+            double tVal = cols[3].w;
+
+            gfx.DrawRectangle(penBlack, brushTot, new XRect(margin, y, tLbl, dataRowH));
+            gfx.DrawString("TOTAL QUANTITY", fBold, XBrushes.Black,
+                           new XRect(margin + 3, y + 1, tLbl - 6, dataRowH - 2),
+                           XStringFormats.TopLeft);
+            gfx.DrawRectangle(penBlack, new XRect(margin + tLbl, y, tVal, dataRowH));
+            gfx.DrawString(totQty.ToString(), fBold, XBrushes.Black,
+                           new XRect(margin + tLbl + 2, y + 1, tVal - 4, dataRowH - 2), fmtRight);
+            y += dataRowH;
+
+            gfx.DrawRectangle(penBlack, brushTot, new XRect(margin, y, tLbl, dataRowH));
+            gfx.DrawString("TOTAL WEIGHT", fBold, XBrushes.Black,
+                           new XRect(margin + 3, y + 1, tLbl - 6, dataRowH - 2),
+                           XStringFormats.TopLeft);
+            gfx.DrawRectangle(penBlack, new XRect(margin + tLbl, y, tVal, dataRowH));
+            gfx.DrawString(totWt.ToString("N1") + " kg", fBold, XBrushes.Black,
+                           new XRect(margin + tLbl + 2, y + 1, tVal - 4, dataRowH - 2), fmtRight);
+
+            // ── Footer ────────────────────────────────────────────────────────────
+            double fy = page.Height.Point - 22;
+            gfx.DrawString("List produced by AUTODESK Advance Steel",
+                           fSmall, XBrushes.Gray,
+                           new XRect(margin, fy, tableW - 60, 10), XStringFormats.TopLeft);
+            gfx.DrawString("Page " + pageNum, fSmall, XBrushes.Gray,
+                           new XRect(margin, fy, tableW, 10), fmtRight);
+
+            gfx.Dispose();
+            doc.Save(outputPath);
+        }
+
         // ── Beam creation helpers ─────────────────────────────────────────────────
 
         private static void CreateBeam(ASPoint3d s, ASPoint3d e)
@@ -514,6 +731,55 @@ namespace Towergeneration
                 : ASVector3d.kZAxis;
 
             new StraightBeam(profile, s, e, vUp).WriteToDb();
+        }
+    }
+
+    // Resolves Windows system fonts for PdfSharp 6 (which requires an explicit IFontResolver).
+    internal sealed class WinFontResolver : IFontResolver
+    {
+        private static readonly string FontsDir =
+            Environment.GetFolderPath(Environment.SpecialFolder.Fonts);
+
+        private static readonly Dictionary<(string, bool, bool), string> Map = new()
+        {
+            { ("Arial",           false, false), "arial"   },
+            { ("Arial",           true,  false), "arialbd" },
+            { ("Arial",           false, true ), "ariali"  },
+            { ("Arial",           true,  true ), "arialbi" },
+            { ("Times New Roman", false, false), "times"   },
+            { ("Times New Roman", true,  false), "timesbd" },
+            { ("Times New Roman", false, true ), "timesi"  },
+            { ("Times New Roman", true,  true ), "timesbi" },
+            { ("Courier New",     false, false), "cour"    },
+            { ("Courier New",     true,  false), "courbd"  },
+            { ("Courier New",     false, true ), "couri"   },
+            { ("Courier New",     true,  true ), "courbi"  },
+        };
+
+        public FontResolverInfo? ResolveTypeface(string familyName, bool bold, bool italic)
+        {
+            if (Map.TryGetValue((familyName, bold, italic), out string? stem))
+                return new FontResolverInfo(stem);
+
+            string key = familyName.ToLowerInvariant().Replace(" ", "")
+                         + (bold && italic ? "bi" : bold ? "bd" : italic ? "i" : "");
+            return new FontResolverInfo(key);
+        }
+
+        public byte[]? GetFont(string faceName)
+        {
+            foreach (string ext in new[] { ".ttf", ".otf", ".ttc" })
+            {
+                string path = Path.Combine(FontsDir, faceName + ext);
+                if (File.Exists(path)) return File.ReadAllBytes(path);
+            }
+            foreach (string file in Directory.GetFiles(FontsDir))
+            {
+                if (string.Equals(Path.GetFileNameWithoutExtension(file),
+                                  faceName, StringComparison.OrdinalIgnoreCase))
+                    return File.ReadAllBytes(file);
+            }
+            return null;
         }
     }
 }

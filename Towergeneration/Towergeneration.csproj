@@ -10,12 +10,15 @@
     <UseWPF>true</UseWPF>
     <ImportWindowsDesktopTargets>true</ImportWindowsDesktopTargets>
     <NoWarn>1591;8618</NoWarn>
+    <!-- Copy all NuGet dependency DLLs (e.g. PdfSharp) to the output directory -->
+    <CopyLocalLockFileAssemblies>true</CopyLocalLockFileAssemblies>
   </PropertyGroup>
 
   <!-- AutoCAD .NET NuGet -->
   <ItemGroup>
     <PackageReference Include="AutoCAD.NET" Version="25.1.0" />
     <PackageReference Include="Newtonsoft.Json" Version="13.0.4" />
+    <PackageReference Include="PdfSharp" Version="6.2.0" />
   </ItemGroup>
 
   <!-- Advance Steel managed API – not copied to output (AS loads them at runtime) -->
