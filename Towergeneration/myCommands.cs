@@ -46,7 +46,7 @@ namespace Towergeneration
         private const string AngleProfile = "L100x10";
 
         private const string JsonPath =
-            @"C:\08-06-2026 (Advance Steel)\mirror.json";
+            @"C:\08-06-2026 (Advance Steel)\Correct.json";
 
         // L100x10 section: 15.1 kg/m  (EN 10056-1)
         private const double KgPerMetre = 15.1;
@@ -89,8 +89,9 @@ namespace Towergeneration
                     {
                         if (m.Type != "Angle") continue;
                         ed.WriteMessage("\n  Member " + m.Mark);
-                        CreateBeam(new ASPoint3d(m.Xs, m.Ys, m.Zs),
-                                   new ASPoint3d(m.Xe, m.Ye, m.Ze));
+                        CreateLinearMember(new ASPoint3d(m.Xs, m.Ys, m.Zs),
+                                           new ASPoint3d(m.Xe, m.Ye, m.Ze),
+                                           m.Description ?? AngleProfile);
                     }
                     tr.Commit();
                 }
@@ -99,6 +100,11 @@ namespace Towergeneration
                 doc.Database.UpdateExt(true);
                 ed.Regen();
                 ed.WriteMessage("\nTower generation complete.");
+
+                // Zoom to fit, switch to SW Isometric, and apply Conceptual visual style
+                // so AS StraightBeam members render as actual 3D steel sections, not wireframe lines.
+                doc.SendStringToExecute("_ZOOM E \n_-VIEW _SWISO \n_VSCURRENT Conceptual \n",
+                                        true, false, false);
             }
             catch (System.Exception ex)
             {
@@ -715,10 +721,905 @@ namespace Towergeneration
             doc.Save(outputPath);
         }
 
-        // ── Beam creation helpers ─────────────────────────────────────────────────
+        // ── GENERATEELEVATION ────────────────────────────────────────────────────
+        //
+        //  Projects every Angle member onto the XY plane (drop Z = top view),
+        //  places AS L100x10 StraightBeam members in model space, then creates a
+        //  dedicated paper-space layout "TOP VIEW" with a scaled viewport.  A WPF
+        //  window lets the user preview the view and export it as a standalone DWG.
+        // -------------------------------------------------------------------------
 
-        private static void CreateBeam(ASPoint3d s, ASPoint3d e)
-            => CreateLinearMember(s, e, AngleProfile);
+        [CommandMethod("GENERATEELEVATION", CommandFlags.Modal)]
+        public static void GenerateElevation()
+        {
+            var doc = AcadApp.DocumentManager.MdiActiveDocument;
+            if (doc == null) return;
+            var ed = doc.Editor;
+
+            try
+            {
+                if (!File.Exists(JsonPath))
+                {
+                    ed.WriteMessage("\nJSON file not found: " + JsonPath);
+                    return;
+                }
+
+                string json = File.ReadAllText(JsonPath);
+                TowerData? td = JsonConvert.DeserializeObject<TowerData>(json);
+
+                if (td?.Members == null || td.Members.Count == 0)
+                {
+                    ed.WriteMessage("\nNo member data found.");
+                    return;
+                }
+
+                var members = td.Members.Where(m => m.Type == "Angle").ToList();
+                if (members.Count == 0)
+                {
+                    ed.WriteMessage("\nNo Angle members found.");
+                    return;
+                }
+
+                // Top view: X horizontal, Y depth (drop Z height).
+                double maxX = members.Max(m => Math.Max(m.Xs, m.Xe));
+                double minX = members.Min(m => Math.Min(m.Xs, m.Xe));
+                double maxY = members.Max(m => Math.Max(m.Ys, m.Ye));
+                double minY = members.Min(m => Math.Min(m.Ys, m.Ye));
+                double elevWidth  = maxX - minX;
+                double elevHeight = maxY - minY;
+
+                // View placed to the right of the 3D tower in model space
+                double offsetX  = members.Max(m => Math.Max(m.Xs, m.Xe)) + 2000.0;
+                double elevMidX = offsetX + (minX + maxX) / 2.0;
+                double elevMidY = (minY + maxY) / 2.0;
+
+                DocumentManager.LockCurrentDocument();
+                var db        = doc.Database;
+                int lineCount = 0;
+                const string layoutName = "TOP VIEW";
+
+                // Build the standalone DWG (Lines only, no AS objects required)
+                var elevDwgDb = new Autodesk.AutoCAD.DatabaseServices.Database(true, true);
+                using (var elevDbTr = elevDwgDb.TransactionManager.StartTransaction())
+                {
+                    var eBt  = (Autodesk.AutoCAD.DatabaseServices.BlockTable)
+                                elevDbTr.GetObject(elevDwgDb.BlockTableId,
+                                    Autodesk.AutoCAD.DatabaseServices.OpenMode.ForRead);
+                    var eBtr = (Autodesk.AutoCAD.DatabaseServices.BlockTableRecord)
+                                elevDbTr.GetObject(
+                                    eBt[Autodesk.AutoCAD.DatabaseServices.BlockTableRecord.ModelSpace],
+                                    Autodesk.AutoCAD.DatabaseServices.OpenMode.ForWrite);
+                    foreach (var m in members)
+                    {
+                        double dx = m.Xe - m.Xs, dy = m.Ye - m.Ys;
+                        if (Math.Sqrt(dx * dx + dy * dy) < 1e-6) continue;
+                        var el = new Autodesk.AutoCAD.DatabaseServices.Line(
+                            new Autodesk.AutoCAD.Geometry.Point3d(m.Xs, m.Ys, 0),
+                            new Autodesk.AutoCAD.Geometry.Point3d(m.Xe, m.Ye, 0));
+                        eBtr.AppendEntity(el);
+                        elevDbTr.AddNewlyCreatedDBObject(el, true);
+                    }
+                    var eTxt = new Autodesk.AutoCAD.DatabaseServices.DBText
+                    {
+                        TextString     = layoutName,
+                        Height         = 200.0,
+                        Position       = new Autodesk.AutoCAD.Geometry.Point3d((minX + maxX) / 2.0, minY - 500.0, 0),
+                        HorizontalMode = Autodesk.AutoCAD.DatabaseServices.TextHorizontalMode.TextCenter,
+                        VerticalMode   = Autodesk.AutoCAD.DatabaseServices.TextVerticalMode.TextBase,
+                        AlignmentPoint = new Autodesk.AutoCAD.Geometry.Point3d((minX + maxX) / 2.0, minY - 500.0, 0),
+                    };
+                    eBtr.AppendEntity(eTxt);
+                    elevDbTr.AddNewlyCreatedDBObject(eTxt, true);
+                    elevDbTr.Commit();
+                }
+
+                // ── AS L100x10 StraightBeam members in model space (X-Y plane) ──
+                using (var asTr = TransactionManager.StartTransaction())
+                {
+                    foreach (var m in members)
+                    {
+                        double dx = m.Xe - m.Xs, dy = m.Ye - m.Ys;
+                        if (Math.Sqrt(dx * dx + dy * dy) < 1e-6) continue;
+                        CreateLinearMember(
+                            new ASPoint3d(offsetX + m.Xs, m.Ys, 0),
+                            new ASPoint3d(offsetX + m.Xe, m.Ye, 0),
+                            AngleProfile);
+                        lineCount++;
+                    }
+                    asTr.Commit();
+                }
+
+                // ── Title text + paper-space layout (AutoCAD DB transaction) ──
+                using (var acadTr = db.TransactionManager.StartTransaction())
+                {
+                    var bt  = (Autodesk.AutoCAD.DatabaseServices.BlockTable)
+                              acadTr.GetObject(db.BlockTableId,
+                                  Autodesk.AutoCAD.DatabaseServices.OpenMode.ForRead);
+                    var btr = (Autodesk.AutoCAD.DatabaseServices.BlockTableRecord)
+                              acadTr.GetObject(
+                                  bt[Autodesk.AutoCAD.DatabaseServices.BlockTableRecord.ModelSpace],
+                                  Autodesk.AutoCAD.DatabaseServices.OpenMode.ForWrite);
+
+                    // Model-space title below the top view
+                    double lblX = elevMidX, lblY = minY - 500.0;
+                    var msTitle = new Autodesk.AutoCAD.DatabaseServices.DBText();
+                    msTitle.SetDatabaseDefaults();
+                    msTitle.TextString    = layoutName;
+                    msTitle.Height        = 200.0;
+                    msTitle.HorizontalMode = Autodesk.AutoCAD.DatabaseServices.TextHorizontalMode.TextCenter;
+                    msTitle.VerticalMode   = Autodesk.AutoCAD.DatabaseServices.TextVerticalMode.TextBase;
+                    msTitle.Position       = new Autodesk.AutoCAD.Geometry.Point3d(lblX, lblY, 0);
+                    msTitle.AlignmentPoint = new Autodesk.AutoCAD.Geometry.Point3d(lblX, lblY, 0);
+                    btr.AppendEntity(msTitle);
+                    acadTr.AddNewlyCreatedDBObject(msTitle, true);
+
+                    // ── Paper-space layout ────────────────────────────────────
+                    var layoutMgr = Autodesk.AutoCAD.DatabaseServices.LayoutManager.Current;
+                    if (layoutMgr.LayoutExists(layoutName))
+                        layoutMgr.DeleteLayout(layoutName);
+                    layoutMgr.CreateLayout(layoutName);
+
+                    var layoutId  = layoutMgr.GetLayoutId(layoutName);
+                    var layout    = (Autodesk.AutoCAD.DatabaseServices.Layout)
+                                    acadTr.GetObject(layoutId,
+                                        Autodesk.AutoCAD.DatabaseServices.OpenMode.ForRead);
+                    var layoutBtr = (Autodesk.AutoCAD.DatabaseServices.BlockTableRecord)
+                                    acadTr.GetObject(layout.BlockTableRecordId,
+                                        Autodesk.AutoCAD.DatabaseServices.OpenMode.ForWrite);
+
+                    // Viewport sized for A3 landscape (420 × 297 mm) with margins
+                    const double paperW = 420.0, paperH = 297.0, vpMargin = 15.0;
+                    double vpW = paperW - 2 * vpMargin;
+                    double vpH = paperH - 2 * vpMargin - 10.0;  // 10 mm title bar at bottom
+
+                    // Scale to fit view with 10% padding
+                    double scaleX    = vpW / elevWidth;
+                    double scaleY    = vpH / elevHeight;
+                    double fitScale  = Math.Min(scaleX, scaleY) / 1.1;
+                    double viewH     = vpH / fitScale;
+
+                    var vp = new Autodesk.AutoCAD.DatabaseServices.Viewport();
+                    vp.SetDatabaseDefaults();
+                    vp.CenterPoint = new Autodesk.AutoCAD.Geometry.Point3d(
+                        paperW / 2.0, vpMargin + 10.0 + vpH / 2.0, 0);
+                    vp.Width       = vpW;
+                    vp.Height      = vpH;
+                    vp.ViewCenter  = new Autodesk.AutoCAD.Geometry.Point2d(elevMidX, elevMidY);
+                    vp.ViewHeight  = viewH;
+                    vp.CustomScale = fitScale;
+                    layoutBtr.AppendEntity(vp);
+                    acadTr.AddNewlyCreatedDBObject(vp, true);
+                    vp.On = true;
+
+                    // Paper-space title text
+                    var psTitle = new Autodesk.AutoCAD.DatabaseServices.DBText();
+                    psTitle.SetDatabaseDefaults();
+                    psTitle.TextString    = layoutName;
+                    psTitle.Height        = 5.0;
+                    psTitle.HorizontalMode = Autodesk.AutoCAD.DatabaseServices.TextHorizontalMode.TextCenter;
+                    psTitle.VerticalMode   = Autodesk.AutoCAD.DatabaseServices.TextVerticalMode.TextBase;
+                    psTitle.Position       = new Autodesk.AutoCAD.Geometry.Point3d(
+                        paperW / 2.0, vpMargin / 2.0, 0);
+                    psTitle.AlignmentPoint = psTitle.Position;
+                    layoutBtr.AppendEntity(psTitle);
+                    acadTr.AddNewlyCreatedDBObject(psTitle, true);
+
+                    acadTr.Commit();
+                }
+
+                // Switch to the new layout (must be outside the transaction)
+                Autodesk.AutoCAD.DatabaseServices.LayoutManager.Current.CurrentLayout = layoutName;
+
+                DocumentManager.UnlockCurrentDocument();
+                doc.Database.UpdateExt(true);
+                ed.Regen();
+                ed.WriteMessage(
+                    $"\nLayout '{layoutName}' created with {lineCount} members.");
+
+                // Enter the layout viewport, apply Conceptual visual style so AS members
+                // render as actual 3D steel sections, then return to paper space.
+                doc.SendStringToExecute("_MSPACE \n_VSCURRENT Conceptual \n_PSPACE \n",
+                                        true, false, false);
+
+                // Show preview window with Save-as-DWG option
+                try
+                {
+                    AcadApp.ShowModalWindow(
+                        null,
+                        BuildElevationWindow(members, minX, maxX, minY, maxY, elevDwgDb),
+                        false);
+                }
+                finally
+                {
+                    elevDwgDb?.Dispose();
+                }
+            }
+            catch (System.Exception ex)
+            {
+                try { DocumentManager.UnlockCurrentDocument(); } catch { }
+                ed.WriteMessage("\nERROR (GENERATEELEVATION): " + ex.Message
+                                + "\n" + ex.StackTrace);
+            }
+        }
+
+        // ── Elevation preview window with Save-as-DWG ────────────────────────────
+
+        private static Window BuildElevationWindow(
+            List<MemberData> members,
+            double minX, double maxX, double minY, double maxY,
+            Autodesk.AutoCAD.DatabaseServices.Database? elevDwgDb)
+        {
+            const double canvasW = 620, canvasH = 420;
+            double elevW = maxX - minX;
+            double elevH = maxY - minY;
+
+            // Scale + translate so the elevation fills the canvas with a 20 px margin
+            double scale  = Math.Min((canvasW - 40) / elevW, (canvasH - 40) / elevH);
+            double transX = 20 + (canvasW - 40 - elevW * scale) / 2.0;
+            double transY = 20 + (canvasH - 40 - elevH * scale) / 2.0;
+
+            var canvas = new Canvas
+            {
+                Width      = canvasW,
+                Height     = canvasH,
+                Background = new SolidColorBrush(WpfColor.FromRgb(28, 28, 28))
+            };
+
+            foreach (var m in members)
+            {
+                // Top view: X horizontal, Y depth
+                double mDx = m.Xe - m.Xs, mDy = m.Ye - m.Ys;
+                double mLen = Math.Sqrt(mDx * mDx + mDy * mDy);
+                if (mLen < 1e-6) continue;
+
+                double cx1 = (m.Xs - minX) * scale + transX;
+                double cy1 = canvasH - ((m.Ys - minY) * scale + transY);
+                double cx2 = (m.Xe - minX) * scale + transX;
+                double cy2 = canvasH - ((m.Ye - minY) * scale + transY);
+
+                // Perpendicular in canvas space
+                double cpx = -mDy / mLen;
+                double cpy = -mDx / mLen;
+                double halfOffset = Math.Max(2.0, GetLegSize(m) / 2.0 * scale);
+
+                // Filled polygon representing the beam member cross-section face
+                var poly = new System.Windows.Shapes.Polygon
+                {
+                    Fill            = new SolidColorBrush(WpfColor.FromRgb(70, 130, 180)),
+                    Stroke          = WpfBrushes.White,
+                    StrokeThickness = 0.5
+                };
+                poly.Points.Add(new System.Windows.Point(cx1 + cpx * halfOffset, cy1 + cpy * halfOffset));
+                poly.Points.Add(new System.Windows.Point(cx2 + cpx * halfOffset, cy2 + cpy * halfOffset));
+                poly.Points.Add(new System.Windows.Point(cx2 - cpx * halfOffset, cy2 - cpy * halfOffset));
+                poly.Points.Add(new System.Windows.Point(cx1 - cpx * halfOffset, cy1 - cpy * halfOffset));
+                canvas.Children.Add(poly);
+            }
+
+            var saveBtn = new System.Windows.Controls.Button
+            {
+                Content             = "Save as DWG",
+                Margin              = new Thickness(0, 8, 0, 0),
+                Padding             = new Thickness(14, 5, 14, 5),
+                HorizontalAlignment = System.Windows.HorizontalAlignment.Left,
+                Background          = new SolidColorBrush(WpfColor.FromRgb(0, 114, 178)),
+                Foreground          = System.Windows.Media.Brushes.White,
+                BorderThickness     = new Thickness(0),
+                FontWeight          = FontWeights.Bold,
+                FontSize            = 11
+            };
+
+            saveBtn.Click += (_, __) =>
+            {
+                if (elevDwgDb == null)
+                {
+                    System.Windows.MessageBox.Show(
+                        "No elevation data available. Re-run GENERATEELEVATION.",
+                        "No Data", MessageBoxButton.OK, MessageBoxImage.Warning);
+                    return;
+                }
+                var dlg = new Microsoft.Win32.SaveFileDialog
+                {
+                    Title            = "Save Elevation as DWG",
+                    Filter           = "AutoCAD Drawing (*.dwg)|*.dwg|All Files (*.*)|*.*",
+                    DefaultExt       = ".dwg",
+                    FileName         = "TopView.dwg",
+                    InitialDirectory = Path.GetDirectoryName(JsonPath) ?? @"C:\"
+                };
+                if (dlg.ShowDialog() != true) return;
+                try
+                {
+                    elevDwgDb.SaveAs(dlg.FileName,
+                        Autodesk.AutoCAD.DatabaseServices.DwgVersion.Current);
+                    System.Windows.MessageBox.Show(
+                        "Elevation saved:\n" + dlg.FileName,
+                        "Saved", MessageBoxButton.OK, MessageBoxImage.Information);
+                }
+                catch (System.Exception ex)
+                {
+                    System.Windows.MessageBox.Show(
+                        "Failed to save DWG:\n" + ex.Message,
+                        "Error", MessageBoxButton.OK, MessageBoxImage.Error);
+                }
+            };
+
+            var header = new TextBlock
+            {
+                Text       = "TOP VIEW — Preview",
+                FontSize   = 13,
+                FontWeight = FontWeights.Bold,
+                Margin     = new Thickness(0, 0, 0, 6)
+            };
+
+            var outer = new StackPanel
+            {
+                Orientation = WpfOrientation.Vertical,
+                Margin      = new Thickness(12)
+            };
+            outer.Children.Add(header);
+            outer.Children.Add(new Border
+            {
+                BorderBrush     = new SolidColorBrush(WpfColor.FromRgb(80, 80, 80)),
+                BorderThickness = new Thickness(1),
+                Child           = canvas
+            });
+            outer.Children.Add(saveBtn);
+
+            return new Window
+            {
+                Title                 = "Top View",
+                Width                 = canvasW + 40,
+                Height                = canvasH + 110,
+                ResizeMode            = ResizeMode.CanResizeWithGrip,
+                WindowStartupLocation = WindowStartupLocation.CenterScreen,
+                Background            = System.Windows.Media.Brushes.White,
+                Content               = outer
+            };
+        }
+
+        private static void SaveTopViewDwg(List<MemberData> members, string outputPath)
+        {
+            // Top view: X horizontal, Y depth (drop Z height).
+            // Write AutoCAD Line entities directly into a fresh DB — no AS transaction needed.
+            using var elevDb = new Autodesk.AutoCAD.DatabaseServices.Database(true, true);
+            using var tr = elevDb.TransactionManager.StartTransaction();
+
+            var bt  = (Autodesk.AutoCAD.DatabaseServices.BlockTable)
+                       tr.GetObject(elevDb.BlockTableId,
+                           Autodesk.AutoCAD.DatabaseServices.OpenMode.ForRead);
+            var btr = (Autodesk.AutoCAD.DatabaseServices.BlockTableRecord)
+                       tr.GetObject(
+                           bt[Autodesk.AutoCAD.DatabaseServices.BlockTableRecord.ModelSpace],
+                           Autodesk.AutoCAD.DatabaseServices.OpenMode.ForWrite);
+
+
+            foreach (var m in members)
+            {
+                double dx = m.Xe - m.Xs;
+                double dy = m.Ye - m.Ys;
+                double len = Math.Sqrt(dx * dx + dy * dy);
+                if (len < 1e-6) continue;
+
+                // ✅ perpendicular direction for thickness
+                double px = -dy / len;
+                double py = dx / len;
+
+                double halfWidth = GetLegSize(m) / 2.0;
+
+                var p1 = new Autodesk.AutoCAD.Geometry.Point2d(m.Xs + px * halfWidth, m.Ys + py * halfWidth);
+                var p2 = new Autodesk.AutoCAD.Geometry.Point2d(m.Xe + px * halfWidth, m.Ye + py * halfWidth);
+                var p3 = new Autodesk.AutoCAD.Geometry.Point2d(m.Xe - px * halfWidth, m.Ye - py * halfWidth);
+                var p4 = new Autodesk.AutoCAD.Geometry.Point2d(m.Xs - px * halfWidth, m.Ys - py * halfWidth);
+
+                var pline = new Autodesk.AutoCAD.DatabaseServices.Polyline(4);
+                pline.AddVertexAt(0, p1, 0, 0, 0);
+                pline.AddVertexAt(1, p2, 0, 0, 0);
+                pline.AddVertexAt(2, p3, 0, 0, 0);
+                pline.AddVertexAt(3, p4, 0, 0, 0);
+                pline.Closed = true;
+
+                btr.AppendEntity(pline);
+                tr.AddNewlyCreatedDBObject(pline, true);
+            }
+
+
+            double cx = (members.Min(m => Math.Min(m.Xs, m.Xe)) +
+                         members.Max(m => Math.Max(m.Xs, m.Xe))) / 2.0;
+            double by = members.Min(m => Math.Min(m.Ys, m.Ye)) - 500.0;
+
+            var txt = new Autodesk.AutoCAD.DatabaseServices.DBText
+            {
+                TextString     = "TOP VIEW",
+                Height         = 200.0,
+                Position       = new Autodesk.AutoCAD.Geometry.Point3d(cx, by, 0),
+                HorizontalMode = Autodesk.AutoCAD.DatabaseServices.TextHorizontalMode.TextCenter,
+                VerticalMode   = Autodesk.AutoCAD.DatabaseServices.TextVerticalMode.TextBase,
+                AlignmentPoint = new Autodesk.AutoCAD.Geometry.Point3d(cx, by, 0),
+            };
+            btr.AppendEntity(txt);
+            tr.AddNewlyCreatedDBObject(txt, true);
+
+            tr.Commit();
+            elevDb.SaveAs(outputPath, Autodesk.AutoCAD.DatabaseServices.DwgVersion.Current);
+        }
+
+
+
+
+        private static void SaveFrontViewDwg(List<MemberData> members, string outputPath, bool mirror = false)
+        {
+            using var elevDb = new Autodesk.AutoCAD.DatabaseServices.Database(true, true);
+
+            using var tr = elevDb.TransactionManager.StartTransaction();
+
+            var bt = (Autodesk.AutoCAD.DatabaseServices.BlockTable)
+                tr.GetObject(elevDb.BlockTableId,
+                    Autodesk.AutoCAD.DatabaseServices.OpenMode.ForRead);
+
+            var btr = (Autodesk.AutoCAD.DatabaseServices.BlockTableRecord)
+                tr.GetObject(
+                    bt[Autodesk.AutoCAD.DatabaseServices.BlockTableRecord.ModelSpace],
+                    Autodesk.AutoCAD.DatabaseServices.OpenMode.ForWrite);
+
+            foreach (var m in members)
+            {
+                double dx = m.Xe - m.Xs;
+                double dz = m.Ze - m.Zs;
+
+                double len = Math.Sqrt(dx * dx + dz * dz);
+                if (len < 1e-6) continue;
+
+                double px = -dz / len;
+                double pz = dx / len;
+
+                double halfWidth = GetLegSize(m) / 2.0;
+
+                // ✅ Apply mirror here
+
+                double x1 = mirror ? -m.Xs : m.Xs;
+                double x2 = mirror ? -m.Xe : m.Xe;
+
+
+                double z1 = m.Zs;
+                double z2 = m.Ze;
+
+
+                var p1 = new Autodesk.AutoCAD.Geometry.Point2d(m.Xs + px * halfWidth, z1 + pz * halfWidth);
+                var p2 = new Autodesk.AutoCAD.Geometry.Point2d(m.Xe + px * halfWidth, z2 + pz * halfWidth);
+                var p3 = new Autodesk.AutoCAD.Geometry.Point2d(m.Xe - px * halfWidth, z2 - pz * halfWidth);
+                var p4 = new Autodesk.AutoCAD.Geometry.Point2d(m.Xs - px * halfWidth, z1 - pz * halfWidth);
+
+                var pline = new Autodesk.AutoCAD.DatabaseServices.Polyline(4);
+                pline.AddVertexAt(0, p1, 0, 0, 0);
+                pline.AddVertexAt(1, p2, 0, 0, 0);
+                pline.AddVertexAt(2, p3, 0, 0, 0);
+                pline.AddVertexAt(3, p4, 0, 0, 0);
+                pline.Closed = true;
+
+                btr.AppendEntity(pline);
+                tr.AddNewlyCreatedDBObject(pline, true);
+            }
+
+            // Title
+            double cx = (members.Min(m => Math.Min(m.Xs, m.Xe)) +
+                         members.Max(m => Math.Max(m.Xs, m.Xe))) / 2.0;
+
+            double baseZ = mirror
+                ? -members.Max(m => Math.Max(m.Zs, m.Ze))
+                : members.Min(m => Math.Min(m.Zs, m.Ze));
+
+            var txt = new Autodesk.AutoCAD.DatabaseServices.DBText
+            {
+                TextString = mirror ? "BACK VIEW" : "FRONT VIEW",
+                Height = 200.0,
+                Position = new Autodesk.AutoCAD.Geometry.Point3d(cx, baseZ - 500.0, 0),
+                HorizontalMode = Autodesk.AutoCAD.DatabaseServices.TextHorizontalMode.TextCenter,
+                VerticalMode = Autodesk.AutoCAD.DatabaseServices.TextVerticalMode.TextBase,
+                AlignmentPoint = new Autodesk.AutoCAD.Geometry.Point3d(cx, baseZ - 500.0, 0),
+            };
+
+            btr.AppendEntity(txt);
+            tr.AddNewlyCreatedDBObject(txt, true);
+
+            tr.Commit();
+
+            elevDb.SaveAs(outputPath, Autodesk.AutoCAD.DatabaseServices.DwgVersion.Current);
+        }
+
+
+
+        private static void SaveRightViewDwg(List<MemberData> members, string outputPath, bool mirror = false)
+        {
+            // Right elevation: Y horizontal, Z vertical (drop X).
+            using var elevDb = new Autodesk.AutoCAD.DatabaseServices.Database(true, true);
+
+            using var tr = elevDb.TransactionManager.StartTransaction();
+
+            var bt = (Autodesk.AutoCAD.DatabaseServices.BlockTable)
+                tr.GetObject(elevDb.BlockTableId,
+                    Autodesk.AutoCAD.DatabaseServices.OpenMode.ForRead);
+
+            var btr = (Autodesk.AutoCAD.DatabaseServices.BlockTableRecord)
+                tr.GetObject(
+                    bt[Autodesk.AutoCAD.DatabaseServices.BlockTableRecord.ModelSpace],
+                    Autodesk.AutoCAD.DatabaseServices.OpenMode.ForWrite);
+
+            foreach (var m in members)
+            {
+
+                double y1 = mirror ? -m.Ys : m.Ys;
+                double y2 = mirror ? -m.Ye : m.Ye;
+
+                double z1 = m.Zs;
+                double z2 = m.Ze;
+
+                double dy = y2 - y1;
+                double dz = z2 - z1;
+
+                double len = Math.Sqrt(dy * dy + dz * dz);
+                if (len < 1e-6) continue;
+
+                // perpendicular direction
+                double py = -dz / len;
+                double pz = dy / len;
+
+                double halfWidth = GetLegSize(m) / 2.0;
+
+                var p1 = new Autodesk.AutoCAD.Geometry.Point2d(y1 + py * halfWidth, z1 + pz * halfWidth);
+                var p2 = new Autodesk.AutoCAD.Geometry.Point2d(y2 + py * halfWidth, z2 + pz * halfWidth);
+                var p3 = new Autodesk.AutoCAD.Geometry.Point2d(y2 - py * halfWidth, z2 - pz * halfWidth);
+                var p4 = new Autodesk.AutoCAD.Geometry.Point2d(y1 - py * halfWidth, z1 - pz * halfWidth);
+
+
+                var pline = new Autodesk.AutoCAD.DatabaseServices.Polyline(4);
+                pline.AddVertexAt(0, p1, 0, 0, 0);
+                pline.AddVertexAt(1, p2, 0, 0, 0);
+                pline.AddVertexAt(2, p3, 0, 0, 0);
+                pline.AddVertexAt(3, p4, 0, 0, 0);
+                pline.Closed = true;
+
+                btr.AppendEntity(pline);
+                tr.AddNewlyCreatedDBObject(pline, true);
+            }
+
+            // Title text
+            double cy = (members.Min(m => Math.Min(m.Ys, m.Ye)) +
+                         members.Max(m => Math.Max(m.Ys, m.Ye))) / 2.0;
+
+            double bz = members.Min(m => Math.Min(m.Zs, m.Ze)) - 500.0;
+
+            var txt = new Autodesk.AutoCAD.DatabaseServices.DBText
+            {
+                TextString = mirror ? "LEFT VIEW" : "RIGHT VIEW",
+                Height = 200.0,
+                Position = new Autodesk.AutoCAD.Geometry.Point3d(cy, bz, 0),
+                HorizontalMode = Autodesk.AutoCAD.DatabaseServices.TextHorizontalMode.TextCenter,
+                VerticalMode = Autodesk.AutoCAD.DatabaseServices.TextVerticalMode.TextBase,
+                AlignmentPoint = new Autodesk.AutoCAD.Geometry.Point3d(cy, bz, 0),
+            };
+
+            btr.AppendEntity(txt);
+            tr.AddNewlyCreatedDBObject(txt, true);
+
+            tr.Commit();
+
+            elevDb.SaveAs(outputPath, Autodesk.AutoCAD.DatabaseServices.DwgVersion.Current);
+        }
+
+
+        // ── SAVEVIEWSDWG ─────────────────────────────────────────────────────
+        //
+        //  Reads the JSON, projects Angle members onto the XY plane, and saves a
+        //  standalone DWG containing only the 2D VIEWS lines.  Run this command
+        //  independently (no WPF window) to get a clean 2D DWG on disk.
+        // -------------------------------------------------------------------------
+
+        [CommandMethod("SAVETOPVIEWDWG", CommandFlags.Modal)]
+        public static void SaveTopViewDwgCommand()
+        {
+            var doc = AcadApp.DocumentManager.MdiActiveDocument;
+            if (doc == null) return;
+            var ed = doc.Editor;
+
+            try
+            {
+                if (!File.Exists(JsonPath))
+                {
+                    ed.WriteMessage("\nJSON file not found: " + JsonPath);
+                    return;
+                }
+
+                string json = File.ReadAllText(JsonPath);
+                TowerData? td = JsonConvert.DeserializeObject<TowerData>(json);
+
+                if (td?.Members == null || td.Members.Count == 0)
+                {
+                    ed.WriteMessage("\nNo member data found.");
+                    return;
+                }
+
+                var members = td.Members.Where(m => m.Type == "Angle").ToList();
+                if (members.Count == 0)
+                {
+                    ed.WriteMessage("\nNo Angle members found.");
+                    return;
+                }
+
+                // AutoCAD commands run on the main thread — show dialog directly
+                var dlg = new Microsoft.Win32.SaveFileDialog
+                {
+                    Title            = "Save Top View as DWG",
+                    Filter           = "AutoCAD Drawing (*.dwg)|*.dwg|All Files (*.*)|*.*",  
+                    DefaultExt       = ".dwg",
+                    FileName         = "TopView.dwg",
+                    InitialDirectory = Path.GetDirectoryName(JsonPath) ?? @"C:\"
+                };
+                string? savePath = (dlg.ShowDialog() == true) ? dlg.FileName : null;
+
+                if (savePath == null)
+                {
+                    ed.WriteMessage("\nSave cancelled.");
+                    return;
+                }
+
+                SaveTopViewDwg(members, savePath);
+                ed.WriteMessage("\nElevation DWG saved: " + savePath);
+            }
+            catch (System.Exception ex)
+            {
+                ed.WriteMessage("\nERROR (SAVETOPVIEWDWG): " + ex.Message
+                                + "\n" + ex.StackTrace);
+            }
+        }
+
+
+
+        [CommandMethod("SAVEFRONTVIEWDWG", CommandFlags.Modal)]
+        public static void SaveFrontViewDwgCommand()
+        {
+            var doc = AcadApp.DocumentManager.MdiActiveDocument;
+            if (doc == null) return;
+
+            var ed = doc.Editor;
+
+            try
+            {
+                if (!File.Exists(JsonPath))
+                {
+                    ed.WriteMessage("\nJSON file not found: " + JsonPath);
+                    return;
+                }
+
+                string json = File.ReadAllText(JsonPath);
+
+                TowerData? td = JsonConvert.DeserializeObject<TowerData>(json);
+
+                if (td?.Members == null || td.Members.Count == 0)
+                {
+                    ed.WriteMessage("\nNo member data found.");
+                    return;
+                }
+
+                var members = td.Members.Where(m => m.Type == "Angle").ToList();
+
+                if (members.Count == 0)
+                {
+                    ed.WriteMessage("\nNo Angle members found.");
+                    return;
+                }
+
+                var dlg = new Microsoft.Win32.SaveFileDialog
+                {
+                    Title = "Save Front View as DWG",
+                    Filter = "AutoCAD Drawing (*.dwg)|*.dwg|All Files (*.*)|*.*",
+                    DefaultExt = ".dwg",
+                    FileName = "FrontView.dwg",
+                    InitialDirectory = Path.GetDirectoryName(JsonPath) ?? @"C:\\"
+                };
+
+                string? savePath = (dlg.ShowDialog() == true) ? dlg.FileName : null;
+
+                if (savePath == null)
+                {
+                    ed.WriteMessage("\nSave cancelled.");
+                    return;
+                }
+
+                SaveFrontViewDwg(members, savePath);
+
+                ed.WriteMessage("\nFront View DWG saved: " + savePath);
+            }
+            catch (System.Exception ex)
+            {
+                ed.WriteMessage("\nERROR (SAVEFRONTVIEWDWG): " + ex.Message + "\n" + ex.StackTrace);
+            }
+        }
+
+
+
+        [CommandMethod("SAVERIGHTVIEWDWG", CommandFlags.Modal)]
+        public static void SaveRightViewDwgCommand()
+        {
+            var doc = AcadApp.DocumentManager.MdiActiveDocument;
+            if (doc == null) return;
+
+            var ed = doc.Editor;
+
+            try
+            {
+                if (!File.Exists(JsonPath))
+                {
+                    ed.WriteMessage("\nJSON file not found: " + JsonPath);
+                    return;
+                }
+
+                string json = File.ReadAllText(JsonPath);
+
+                TowerData? td = JsonConvert.DeserializeObject<TowerData>(json);
+
+                if (td?.Members == null || td.Members.Count == 0)
+                {
+                    ed.WriteMessage("\nNo member data found.");
+                    return;
+                }
+
+                var members = td.Members.Where(m => m.Type == "Angle").ToList();
+
+                if (members.Count == 0)
+                {
+                    ed.WriteMessage("\nNo Angle members found.");
+                    return;
+                }
+
+                var dlg = new Microsoft.Win32.SaveFileDialog
+                {
+                    Title = "Save Right View as DWG",
+                    Filter = "AutoCAD Drawing (*.dwg)|*.dwg|All Files (*.*)|*.*",
+                    DefaultExt = ".dwg",
+                    FileName = "RightView.dwg",
+                    InitialDirectory = Path.GetDirectoryName(JsonPath) ?? @"C:\\"
+                };
+
+                string? savePath = (dlg.ShowDialog() == true) ? dlg.FileName : null;
+
+                if (savePath == null)
+                {
+                    ed.WriteMessage("\nSave cancelled.");
+                    return;
+                }
+
+                SaveRightViewDwg(members, savePath);
+
+                ed.WriteMessage("\nRight View DWG saved: " + savePath);
+            }
+            catch (System.Exception ex)
+            {
+                ed.WriteMessage("\nERROR (SAVERIGHTVIEWDWG): " + ex.Message + "\n" + ex.StackTrace);
+            }
+        }
+
+
+
+
+
+        [CommandMethod("SAVEBACKVIEWDWG", CommandFlags.Modal)]
+        public static void SaveBackViewDwgCommand()
+        {
+            var doc = AcadApp.DocumentManager.MdiActiveDocument;
+            if (doc == null) return;
+
+            var ed = doc.Editor;
+
+            try
+            {
+                if (!File.Exists(JsonPath))
+                {
+                    ed.WriteMessage("\nJSON file not found: " + JsonPath);
+                    return;
+                }
+
+                string json = File.ReadAllText(JsonPath);
+                TowerData? td = JsonConvert.DeserializeObject<TowerData>(json);
+
+                if (td?.Members == null || td.Members.Count == 0)
+                {
+                    ed.WriteMessage("\nNo member data found.");
+                    return;
+                }
+
+                var members = td.Members.Where(m => m.Type == "Angle").ToList();
+
+                var dlg = new Microsoft.Win32.SaveFileDialog
+                {
+                    Title = "Save Back View as DWG",
+                    Filter = "AutoCAD Drawing (*.dwg)|*.dwg|All Files (*.*)|*.*",
+                    DefaultExt = ".dwg",
+                    FileName = "BackView.dwg",
+                    InitialDirectory = Path.GetDirectoryName(JsonPath) ?? @"C:\\"
+                };
+
+                if (dlg.ShowDialog() != true) return;
+
+                // ✅ Just mirror
+                SaveFrontViewDwg(members, dlg.FileName, mirror: true);
+
+                ed.WriteMessage("\nBack View DWG saved: " + dlg.FileName);
+            }
+            catch (System.Exception ex)
+            {
+                ed.WriteMessage("\nERROR (SAVEBACKVIEWDWG): " + ex.Message);
+            }
+        }
+
+
+
+        [CommandMethod("SAVELEFTVIEWDWG", CommandFlags.Modal)]
+        public static void SaveLeftViewDwgCommand()
+        {
+            var doc = AcadApp.DocumentManager.MdiActiveDocument;
+            if (doc == null) return;
+
+            var ed = doc.Editor;
+
+            try
+            {
+                if (!File.Exists(JsonPath))
+                {
+                    ed.WriteMessage("\nJSON file not found: " + JsonPath);
+                    return;
+                }
+
+                string json = File.ReadAllText(JsonPath);
+                TowerData? td = JsonConvert.DeserializeObject<TowerData>(json);
+
+                var members = td?.Members?.Where(m => m.Type == "Angle").ToList();
+                if (members == null || members.Count == 0)
+                {
+                    ed.WriteMessage("\nNo Angle members found.");
+                    return;
+                }
+
+                var dlg = new Microsoft.Win32.SaveFileDialog
+                {
+                    Title = "Save Left View as DWG",
+                    Filter = "AutoCAD Drawing (*.dwg)|*.dwg",
+                    FileName = "LeftView.dwg"
+                };
+
+                if (dlg.ShowDialog() != true) return;
+
+                // ✅ reuse right view with mirror
+                SaveRightViewDwg(members, dlg.FileName, mirror: true);
+
+                ed.WriteMessage("\nLeft View DWG saved: " + dlg.FileName);
+            }
+            catch (System.Exception ex)
+            {
+                ed.WriteMessage("\nERROR (SAVELEFTVIEWDWG): " + ex.Message);
+            }
+        }
+
+
+
+
+
+
+
+        // ── Elevation drawing helpers ────────────────────────────────────────────
+
+        // Extracts the first leg dimension (mm) from a section description string.
+        // "L100X10" → 100   "L80x80x6" → 80   "HL150x150x20" → 150
+        private static double GetLegSize(MemberData m)
+        {
+            var match = System.Text.RegularExpressions.Regex.Match(
+                m.Description ?? "", @"[Hh]?[Ll](\d+)");
+            if (match.Success &&
+                double.TryParse(match.Groups[1].Value, out double leg))
+                return leg;
+            return 100.0;
+        }
+
+        // ── Beam creation helpers ─────────────────────────────────────────────────
 
         private static void CreateLinearMember(ASPoint3d s, ASPoint3d e, string profile)
         {
