@@ -46,7 +46,7 @@ namespace Towergeneration
         private const string AngleProfile = "L100x10";
 
         private const string JsonPath =
-            @"C:\08-06-2026 (Advance Steel)\Correct.json";
+            @"C:\Kalpataru Project\Towergeneration_trial\Correct.json";      
 
         // L100x10 section: 15.1 kg/m  (EN 10056-1)
         private const double KgPerMetre = 15.1;
@@ -91,7 +91,7 @@ namespace Towergeneration
                         ed.WriteMessage("\n  Member " + m.Mark);
                         CreateLinearMember(new ASPoint3d(m.Xs, m.Ys, m.Zs),
                                            new ASPoint3d(m.Xe, m.Ye, m.Ze),
-                                           m.Description ?? AngleProfile);
+                                           AngleProfile);
                     }
                     tr.Commit();
                 }
