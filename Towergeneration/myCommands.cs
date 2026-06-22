@@ -53,65 +53,64 @@ namespace Towergeneration
         private const string SectionGrade = "S355JR";
         private const string SectionDesc  = "L100X10";
 
-        // ── GENERATEFROMJSON ─────────────────────────────────────────────────────
+        
+// ✅ Command 1
+    [CommandMethod("GENERATEFROMJSON", CommandFlags.Modal)]
+    public void GenerateFromJson()
+    {
 
-        [CommandMethod("GENERATEFROMJSON", CommandFlags.Modal)]
-        public void GenerateFromJson()
-        {
             var doc = AcadApp.DocumentManager.MdiActiveDocument;
             if (doc == null) return;
+
             var ed = doc.Editor;
 
             try
             {
                 if (!File.Exists(JsonPath))
                 {
-                    ed.WriteMessage("\nJSON file not found: " + JsonPath);
+                    ed.WriteMessage("\nJSON file not found.");
                     return;
                 }
 
                 string json = File.ReadAllText(JsonPath);
-                TowerData? td = JsonConvert.DeserializeObject<TowerData>(json);
+                TowerData td = JsonConvert.DeserializeObject<TowerData>(json);
 
-                if (td?.Members == null)
+                if (td?.Members == null || td.Members.Count == 0)
                 {
-                    ed.WriteMessage("\nNo member data found.");
+                    ed.WriteMessage("\nNo members found.");
                     return;
                 }
 
-                ed.WriteMessage("\nProject : " + td.ProjectName);
-                ed.WriteMessage("\nMembers : " + td.Members.Count);
-
                 DocumentManager.LockCurrentDocument();
+
                 using (var tr = TransactionManager.StartTransaction())
                 {
                     foreach (var m in td.Members)
                     {
                         if (m.Type != "Angle") continue;
-                        ed.WriteMessage("\n  Member " + m.Mark);
-                        CreateLinearMember(new ASPoint3d(m.Xs, m.Ys, m.Zs),
-                                           new ASPoint3d(m.Xe, m.Ye, m.Ze),
-                                           AngleProfile);
+
+                        CreateLinearMember(
+                            new ASPoint3d(m.Xs, m.Ys, m.Zs),
+                            new ASPoint3d(m.Xe, m.Ye, m.Ze),
+                            AngleProfile);
                     }
+
                     tr.Commit();
                 }
+
                 DocumentManager.UnlockCurrentDocument();
 
                 doc.Database.UpdateExt(true);
                 ed.Regen();
-                ed.WriteMessage("\nTower generation complete.");
 
-                // Zoom to fit, switch to SW Isometric, and apply Conceptual visual style
-                // so AS StraightBeam members render as actual 3D steel sections, not wireframe lines.
-                doc.SendStringToExecute("_ZOOM E \n_-VIEW _SWISO \n_VSCURRENT Conceptual \n",
-                                        true, false, false);
+                ed.WriteMessage("\nModel created successfully.");
             }
             catch (System.Exception ex)
             {
-                try { DocumentManager.UnlockCurrentDocument(); } catch { }
                 ed.WriteMessage("\nERROR: " + ex.Message);
             }
-        }
+
+        }   // ✅ MUST CLOSE HERE
 
         // ── GENERATEBOM ──────────────────────────────────────────────────────────
         //
@@ -918,8 +917,10 @@ namespace Towergeneration
 
                 // Enter the layout viewport, apply Conceptual visual style so AS members
                 // render as actual 3D steel sections, then return to paper space.
-                doc.SendStringToExecute("_MSPACE \n_VSCURRENT Conceptual \n_PSPACE \n",
-                                        true, false, false);
+
+                doc.SendStringToExecute("_AstM4CommMarkAddPrefix \n", true, false, false);
+                doc.SendStringToExecute("_AstM4CommNumbering \n", true, false, false);
+
 
                 // Show preview window with Save-as-DWG option
                 try
