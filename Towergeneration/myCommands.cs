@@ -1080,68 +1080,183 @@ namespace Towergeneration
 
         private static void SaveTopViewDwg(List<MemberData> members, string outputPath)
         {
-            // Top view: X horizontal, Y depth (drop Z height).
-            // Write AutoCAD Line entities directly into a fresh DB — no AS transaction needed.
-            using var elevDb = new Autodesk.AutoCAD.DatabaseServices.Database(true, true);
-            using var tr = elevDb.TransactionManager.StartTransaction();
+            // Top view: X horizontal, Y depth (drop Z).
+            // AS StraightBeam must target the active doc — write to a dedicated layer,
+            // SaveAs to a temp file, filter the temp file to keep only that layer,
+            // then re-save the filtered DB to outputPath and erase the temp entities.
+            var doc = AcadApp.DocumentManager.MdiActiveDocument;
+            var db  = doc.Database;
 
-            var bt  = (Autodesk.AutoCAD.DatabaseServices.BlockTable)
-                       tr.GetObject(elevDb.BlockTableId,
-                           Autodesk.AutoCAD.DatabaseServices.OpenMode.ForRead);
-            var btr = (Autodesk.AutoCAD.DatabaseServices.BlockTableRecord)
-                       tr.GetObject(
-                           bt[Autodesk.AutoCAD.DatabaseServices.BlockTableRecord.ModelSpace],
-                           Autodesk.AutoCAD.DatabaseServices.OpenMode.ForWrite);
+            const string TV_LAYER = "AUTOGEN_TOP_VIEW_2D";
+            double minX = members.Min(m => Math.Min(m.Xs, m.Xe));
+            double maxX = members.Max(m => Math.Max(m.Xs, m.Xe));
+            double minY = members.Min(m => Math.Min(m.Ys, m.Ye));
 
+            DocumentManager.LockCurrentDocument();
 
-            foreach (var m in members)
+            // ── Step 1: Create export layer ───────────────────────────────────
+            Autodesk.AutoCAD.DatabaseServices.ObjectId tvLayerId;
+            using (var lyrTr = db.TransactionManager.StartTransaction())
             {
-                double dx = m.Xe - m.Xs;
-                double dy = m.Ye - m.Ys;
-                double len = Math.Sqrt(dx * dx + dy * dy);
-                if (len < 1e-6) continue;
-
-                // ✅ perpendicular direction for thickness
-                double px = -dy / len;
-                double py = dx / len;
-
-                double halfWidth = GetLegSize(m) / 2.0;
-
-                var p1 = new Autodesk.AutoCAD.Geometry.Point2d(m.Xs + px * halfWidth, m.Ys + py * halfWidth);
-                var p2 = new Autodesk.AutoCAD.Geometry.Point2d(m.Xe + px * halfWidth, m.Ye + py * halfWidth);
-                var p3 = new Autodesk.AutoCAD.Geometry.Point2d(m.Xe - px * halfWidth, m.Ye - py * halfWidth);
-                var p4 = new Autodesk.AutoCAD.Geometry.Point2d(m.Xs - px * halfWidth, m.Ys - py * halfWidth);
-
-                var pline = new Autodesk.AutoCAD.DatabaseServices.Polyline(4);
-                pline.AddVertexAt(0, p1, 0, 0, 0);
-                pline.AddVertexAt(1, p2, 0, 0, 0);
-                pline.AddVertexAt(2, p3, 0, 0, 0);
-                pline.AddVertexAt(3, p4, 0, 0, 0);
-                pline.Closed = true;
-
-                btr.AppendEntity(pline);
-                tr.AddNewlyCreatedDBObject(pline, true);
+                var lt = (Autodesk.AutoCAD.DatabaseServices.LayerTable)
+                          lyrTr.GetObject(db.LayerTableId,
+                              Autodesk.AutoCAD.DatabaseServices.OpenMode.ForWrite);
+                if (lt.Has(TV_LAYER))
+                {
+                    tvLayerId = lt[TV_LAYER];
+                }
+                else
+                {
+                    var lr = new Autodesk.AutoCAD.DatabaseServices.LayerTableRecord
+                        { Name = TV_LAYER };
+                    tvLayerId = lt.Add(lr);
+                    lyrTr.AddNewlyCreatedDBObject(lr, true);
+                }
+                lyrTr.Commit();
             }
 
+            // ── Step 2: Switch to TV_LAYER, write AS StraightBeam at Z=0 ─────
+            var savedClayer = db.Clayer;
+            db.Clayer = tvLayerId;
 
-            double cx = (members.Min(m => Math.Min(m.Xs, m.Xe)) +
-                         members.Max(m => Math.Max(m.Xs, m.Xe))) / 2.0;
-            double by = members.Min(m => Math.Min(m.Ys, m.Ye)) - 500.0;
-
-            var txt = new Autodesk.AutoCAD.DatabaseServices.DBText
+            using (var asTr = TransactionManager.StartTransaction())
             {
-                TextString     = "TOP VIEW",
-                Height         = 200.0,
-                Position       = new Autodesk.AutoCAD.Geometry.Point3d(cx, by, 0),
-                HorizontalMode = Autodesk.AutoCAD.DatabaseServices.TextHorizontalMode.TextCenter,
-                VerticalMode   = Autodesk.AutoCAD.DatabaseServices.TextVerticalMode.TextBase,
-                AlignmentPoint = new Autodesk.AutoCAD.Geometry.Point3d(cx, by, 0),
-            };
-            btr.AppendEntity(txt);
-            tr.AddNewlyCreatedDBObject(txt, true);
+                foreach (var m in members)
+                {
+                    double dx = m.Xe - m.Xs, dy = m.Ye - m.Ys;
+                    if (Math.Sqrt(dx * dx + dy * dy) < 1e-6) continue;
+                    CreateLinearMember(
+                        new ASPoint3d(m.Xs, m.Ys, 0),
+                        new ASPoint3d(m.Xe, m.Ye, 0),
+                        AngleProfile);
+                }
+                asTr.Commit();
+            }
 
-            tr.Commit();
-            elevDb.SaveAs(outputPath, Autodesk.AutoCAD.DatabaseServices.DwgVersion.Current);
+            db.Clayer = savedClayer;
+
+            // ── Step 3: Collect TV_LAYER entity IDs + add title text ──────────
+            var topViewIds = new Autodesk.AutoCAD.DatabaseServices.ObjectIdCollection();
+            using (var acadTr = db.TransactionManager.StartTransaction())
+            {
+                var bt  = (Autodesk.AutoCAD.DatabaseServices.BlockTable)
+                           acadTr.GetObject(db.BlockTableId,
+                               Autodesk.AutoCAD.DatabaseServices.OpenMode.ForRead);
+                var btr = (Autodesk.AutoCAD.DatabaseServices.BlockTableRecord)
+                           acadTr.GetObject(
+                               bt[Autodesk.AutoCAD.DatabaseServices.BlockTableRecord.ModelSpace],
+                               Autodesk.AutoCAD.DatabaseServices.OpenMode.ForWrite);
+
+                foreach (Autodesk.AutoCAD.DatabaseServices.ObjectId id in btr)
+                {
+                    if (id.IsErased) continue;
+                    var ent = (Autodesk.AutoCAD.DatabaseServices.Entity)
+                               acadTr.GetObject(id,
+                                   Autodesk.AutoCAD.DatabaseServices.OpenMode.ForRead);
+                    if (ent.Layer == TV_LAYER) topViewIds.Add(id);
+                }
+
+                double cx = (minX + maxX) / 2.0;
+                double by = minY - 500.0;
+                var txt = new Autodesk.AutoCAD.DatabaseServices.DBText();
+                txt.SetDatabaseDefaults();
+                txt.Layer          = TV_LAYER;
+                txt.TextString     = "TOP VIEW";
+                txt.Height         = 200.0;
+                txt.HorizontalMode = Autodesk.AutoCAD.DatabaseServices.TextHorizontalMode.TextCenter;
+                txt.VerticalMode   = Autodesk.AutoCAD.DatabaseServices.TextVerticalMode.TextBase;
+                txt.Position       = new Autodesk.AutoCAD.Geometry.Point3d(cx, by, 0);
+                txt.AlignmentPoint = new Autodesk.AutoCAD.Geometry.Point3d(cx, by, 0);
+                btr.AppendEntity(txt);
+                acadTr.AddNewlyCreatedDBObject(txt, true);
+                topViewIds.Add(txt.ObjectId);
+                acadTr.Commit();
+            }
+
+            string? origFilename = db.Filename;
+            string tempPath = System.IO.Path.Combine(
+                System.IO.Path.GetTempPath(),
+                System.IO.Path.GetRandomFileName() + ".dwg");
+
+            try
+            {
+                // ── Step 4: Save full drawing (incl. top-view entities) to temp ─
+                db.SaveAs(tempPath, Autodesk.AutoCAD.DatabaseServices.DwgVersion.Current);
+
+                // ── Step 5: Open temp DWG, keep only TV_LAYER, save to output ──
+                // Entity.Layer is a base attribute accessible on all types, including
+                // AS proxy objects loaded via ReadDwgFile — so the filter is reliable.
+                using (var tempDb = new Autodesk.AutoCAD.DatabaseServices.Database(false, true))
+                {
+                    tempDb.ReadDwgFile(tempPath,
+                        Autodesk.AutoCAD.DatabaseServices.FileOpenMode.OpenForReadAndWriteNoShare,
+                        false, "");
+
+                    using (var tempTr = tempDb.TransactionManager.StartTransaction())
+                    {
+                        var bt  = (Autodesk.AutoCAD.DatabaseServices.BlockTable)
+                                   tempTr.GetObject(tempDb.BlockTableId,
+                                       Autodesk.AutoCAD.DatabaseServices.OpenMode.ForRead);
+                        var btr = (Autodesk.AutoCAD.DatabaseServices.BlockTableRecord)
+                                   tempTr.GetObject(
+                                       bt[Autodesk.AutoCAD.DatabaseServices.BlockTableRecord.ModelSpace],
+                                       Autodesk.AutoCAD.DatabaseServices.OpenMode.ForRead);
+
+                        var toErase = new List<Autodesk.AutoCAD.DatabaseServices.ObjectId>();
+                        foreach (Autodesk.AutoCAD.DatabaseServices.ObjectId id in btr)
+                        {
+                            if (id.IsErased) continue;
+                            var ent = (Autodesk.AutoCAD.DatabaseServices.Entity)
+                                       tempTr.GetObject(id,
+                                           Autodesk.AutoCAD.DatabaseServices.OpenMode.ForRead);
+                            if (ent.Layer != TV_LAYER) toErase.Add(id);
+                        }
+
+                        foreach (var id in toErase)
+                        {
+                            var ent = (Autodesk.AutoCAD.DatabaseServices.Entity)
+                                       tempTr.GetObject(id,
+                                           Autodesk.AutoCAD.DatabaseServices.OpenMode.ForWrite);
+                            ent.Erase();
+                        }
+                        tempTr.Commit();
+                    }
+
+                    tempDb.SaveAs(outputPath,
+                        Autodesk.AutoCAD.DatabaseServices.DwgVersion.Current);
+                }
+            }
+            finally
+            {
+                // ── Step 6: Erase top-view entities from active doc ───────────
+                using (var eraseTr = db.TransactionManager.StartTransaction())
+                {
+                    foreach (Autodesk.AutoCAD.DatabaseServices.ObjectId id in topViewIds)
+                    {
+                        if (id.IsErased) continue;
+                        var ent = (Autodesk.AutoCAD.DatabaseServices.Entity)
+                                   eraseTr.GetObject(id,
+                                       Autodesk.AutoCAD.DatabaseServices.OpenMode.ForWrite, true);
+                        ent.Erase();
+                    }
+                    eraseTr.Commit();
+                }
+
+                // ── Step 7: Restore active doc's filename/saved state ─────────
+                if (!string.IsNullOrEmpty(origFilename) &&
+                    System.IO.File.Exists(origFilename))
+                {
+                    try
+                    {
+                        db.SaveAs(origFilename,
+                            Autodesk.AutoCAD.DatabaseServices.DwgVersion.Current);
+                    }
+                    catch { }
+                }
+
+                try { System.IO.File.Delete(tempPath); } catch { }
+                DocumentManager.UnlockCurrentDocument();
+            }
         }
 
 
@@ -1149,162 +1264,338 @@ namespace Towergeneration
 
         private static void SaveFrontViewDwg(List<MemberData> members, string outputPath, bool mirror = false)
         {
-            using var elevDb = new Autodesk.AutoCAD.DatabaseServices.Database(true, true);
+            // Front/back elevation: X horizontal, Z vertical (drop Y).
+            // Identical save-to-temp → filter-by-layer pattern as SaveTopViewDwg.
+            var doc = AcadApp.DocumentManager.MdiActiveDocument;
+            var db  = doc.Database;
 
-            using var tr = elevDb.TransactionManager.StartTransaction();
+            const string TV_LAYER = "AUTOGEN_FRONT_VIEW_2D";
+            double minX = members.Min(m => Math.Min(m.Xs, m.Xe));
+            double maxX = members.Max(m => Math.Max(m.Xs, m.Xe));
+            double minZ = members.Min(m => Math.Min(m.Zs, m.Ze));
 
-            var bt = (Autodesk.AutoCAD.DatabaseServices.BlockTable)
-                tr.GetObject(elevDb.BlockTableId,
-                    Autodesk.AutoCAD.DatabaseServices.OpenMode.ForRead);
+            DocumentManager.LockCurrentDocument();
 
-            var btr = (Autodesk.AutoCAD.DatabaseServices.BlockTableRecord)
-                tr.GetObject(
-                    bt[Autodesk.AutoCAD.DatabaseServices.BlockTableRecord.ModelSpace],
-                    Autodesk.AutoCAD.DatabaseServices.OpenMode.ForWrite);
-
-            foreach (var m in members)
+            // ── Step 1: Create export layer ───────────────────────────────────
+            Autodesk.AutoCAD.DatabaseServices.ObjectId tvLayerId;
+            using (var lyrTr = db.TransactionManager.StartTransaction())
             {
-                double dx = m.Xe - m.Xs;
-                double dz = m.Ze - m.Zs;
-
-                double len = Math.Sqrt(dx * dx + dz * dz);
-                if (len < 1e-6) continue;
-
-                double px = -dz / len;
-                double pz = dx / len;
-
-                double halfWidth = GetLegSize(m) / 2.0;
-
-                // ✅ Apply mirror here
-
-                double x1 = mirror ? -m.Xs : m.Xs;
-                double x2 = mirror ? -m.Xe : m.Xe;
-
-
-                double z1 = m.Zs;
-                double z2 = m.Ze;
-
-
-                var p1 = new Autodesk.AutoCAD.Geometry.Point2d(m.Xs + px * halfWidth, z1 + pz * halfWidth);
-                var p2 = new Autodesk.AutoCAD.Geometry.Point2d(m.Xe + px * halfWidth, z2 + pz * halfWidth);
-                var p3 = new Autodesk.AutoCAD.Geometry.Point2d(m.Xe - px * halfWidth, z2 - pz * halfWidth);
-                var p4 = new Autodesk.AutoCAD.Geometry.Point2d(m.Xs - px * halfWidth, z1 - pz * halfWidth);
-
-                var pline = new Autodesk.AutoCAD.DatabaseServices.Polyline(4);
-                pline.AddVertexAt(0, p1, 0, 0, 0);
-                pline.AddVertexAt(1, p2, 0, 0, 0);
-                pline.AddVertexAt(2, p3, 0, 0, 0);
-                pline.AddVertexAt(3, p4, 0, 0, 0);
-                pline.Closed = true;
-
-                btr.AppendEntity(pline);
-                tr.AddNewlyCreatedDBObject(pline, true);
+                var lt = (Autodesk.AutoCAD.DatabaseServices.LayerTable)
+                          lyrTr.GetObject(db.LayerTableId,
+                              Autodesk.AutoCAD.DatabaseServices.OpenMode.ForWrite);
+                if (lt.Has(TV_LAYER))
+                {
+                    tvLayerId = lt[TV_LAYER];
+                }
+                else
+                {
+                    var lr = new Autodesk.AutoCAD.DatabaseServices.LayerTableRecord
+                        { Name = TV_LAYER };
+                    tvLayerId = lt.Add(lr);
+                    lyrTr.AddNewlyCreatedDBObject(lr, true);
+                }
+                lyrTr.Commit();
             }
 
-            // Title
-            double cx = (members.Min(m => Math.Min(m.Xs, m.Xe)) +
-                         members.Max(m => Math.Max(m.Xs, m.Xe))) / 2.0;
+            // ── Step 2: Switch to TV_LAYER, write AS StraightBeam members ─────
+            // Map into XY plane at Z=0: horizontal = m.Xs/Xe (negated if back), vertical = m.Zs/Ze
+            var savedClayer = db.Clayer;
+            db.Clayer = tvLayerId;
 
-            double baseZ = mirror
-                ? -members.Max(m => Math.Max(m.Zs, m.Ze))
-                : members.Min(m => Math.Min(m.Zs, m.Ze));
-
-            var txt = new Autodesk.AutoCAD.DatabaseServices.DBText
+            using (var asTr = TransactionManager.StartTransaction())
             {
-                TextString = mirror ? "BACK VIEW" : "FRONT VIEW",
-                Height = 200.0,
-                Position = new Autodesk.AutoCAD.Geometry.Point3d(cx, baseZ - 500.0, 0),
-                HorizontalMode = Autodesk.AutoCAD.DatabaseServices.TextHorizontalMode.TextCenter,
-                VerticalMode = Autodesk.AutoCAD.DatabaseServices.TextVerticalMode.TextBase,
-                AlignmentPoint = new Autodesk.AutoCAD.Geometry.Point3d(cx, baseZ - 500.0, 0),
-            };
+                foreach (var m in members)
+                {
+                    double dx = m.Xe - m.Xs, dz = m.Ze - m.Zs;
+                    if (Math.Sqrt(dx * dx + dz * dz) < 1e-6) continue;
 
-            btr.AppendEntity(txt);
-            tr.AddNewlyCreatedDBObject(txt, true);
+                    double sx = mirror ? -m.Xs : m.Xs;
+                    double ex = mirror ? -m.Xe : m.Xe;
+                    CreateLinearMember(
+                        new ASPoint3d(sx, m.Zs, 0),
+                        new ASPoint3d(ex, m.Ze, 0),
+                        AngleProfile);
+                }
+                asTr.Commit();
+            }
 
-            tr.Commit();
+            db.Clayer = savedClayer;
 
-            elevDb.SaveAs(outputPath, Autodesk.AutoCAD.DatabaseServices.DwgVersion.Current);
+            // ── Step 3: Collect TV_LAYER IDs + add title text ─────────────────
+            var topViewIds = new Autodesk.AutoCAD.DatabaseServices.ObjectIdCollection();
+            using (var acadTr = db.TransactionManager.StartTransaction())
+            {
+                var bt  = (Autodesk.AutoCAD.DatabaseServices.BlockTable)
+                           acadTr.GetObject(db.BlockTableId,
+                               Autodesk.AutoCAD.DatabaseServices.OpenMode.ForRead);
+                var btr = (Autodesk.AutoCAD.DatabaseServices.BlockTableRecord)
+                           acadTr.GetObject(
+                               bt[Autodesk.AutoCAD.DatabaseServices.BlockTableRecord.ModelSpace],
+                               Autodesk.AutoCAD.DatabaseServices.OpenMode.ForWrite);
+
+                foreach (Autodesk.AutoCAD.DatabaseServices.ObjectId id in btr)
+                {
+                    if (id.IsErased) continue;
+                    var ent = (Autodesk.AutoCAD.DatabaseServices.Entity)
+                               acadTr.GetObject(id, Autodesk.AutoCAD.DatabaseServices.OpenMode.ForRead);
+                    if (ent.Layer == TV_LAYER) topViewIds.Add(id);
+                }
+
+                double cx     = (minX + maxX) / 2.0;
+                double titleX = mirror ? -cx : cx;
+                var txt = new Autodesk.AutoCAD.DatabaseServices.DBText();
+                txt.SetDatabaseDefaults();
+                txt.Layer          = TV_LAYER;
+                txt.TextString     = mirror ? "BACK VIEW" : "FRONT VIEW";
+                txt.Height         = 200.0;
+                txt.HorizontalMode = Autodesk.AutoCAD.DatabaseServices.TextHorizontalMode.TextCenter;
+                txt.VerticalMode   = Autodesk.AutoCAD.DatabaseServices.TextVerticalMode.TextBase;
+                txt.Position       = new Autodesk.AutoCAD.Geometry.Point3d(titleX, minZ - 500.0, 0);
+                txt.AlignmentPoint = new Autodesk.AutoCAD.Geometry.Point3d(titleX, minZ - 500.0, 0);
+                btr.AppendEntity(txt);
+                acadTr.AddNewlyCreatedDBObject(txt, true);
+                topViewIds.Add(txt.ObjectId);
+                acadTr.Commit();
+            }
+
+            string? origFilename = db.Filename;
+            string tempPath = System.IO.Path.Combine(
+                System.IO.Path.GetTempPath(),
+                System.IO.Path.GetRandomFileName() + ".dwg");
+
+            try
+            {
+                // ── Step 4: Save full drawing to temp ─────────────────────────
+                db.SaveAs(tempPath, Autodesk.AutoCAD.DatabaseServices.DwgVersion.Current);
+
+                // ── Step 5: Filter temp DWG to TV_LAYER only, re-save ─────────
+                using (var tempDb = new Autodesk.AutoCAD.DatabaseServices.Database(false, true))
+                {
+                    tempDb.ReadDwgFile(tempPath,
+                        Autodesk.AutoCAD.DatabaseServices.FileOpenMode.OpenForReadAndWriteNoShare,
+                        false, "");
+
+                    using (var tempTr = tempDb.TransactionManager.StartTransaction())
+                    {
+                        var bt  = (Autodesk.AutoCAD.DatabaseServices.BlockTable)
+                                   tempTr.GetObject(tempDb.BlockTableId,
+                                       Autodesk.AutoCAD.DatabaseServices.OpenMode.ForRead);
+                        var btr = (Autodesk.AutoCAD.DatabaseServices.BlockTableRecord)
+                                   tempTr.GetObject(
+                                       bt[Autodesk.AutoCAD.DatabaseServices.BlockTableRecord.ModelSpace],
+                                       Autodesk.AutoCAD.DatabaseServices.OpenMode.ForRead);
+
+                        var toErase = new List<Autodesk.AutoCAD.DatabaseServices.ObjectId>();
+                        foreach (Autodesk.AutoCAD.DatabaseServices.ObjectId id in btr)
+                        {
+                            if (id.IsErased) continue;
+                            var ent = (Autodesk.AutoCAD.DatabaseServices.Entity)
+                                       tempTr.GetObject(id, Autodesk.AutoCAD.DatabaseServices.OpenMode.ForRead);
+                            if (ent.Layer != TV_LAYER) toErase.Add(id);
+                        }
+                        foreach (var id in toErase)
+                        {
+                            var ent = (Autodesk.AutoCAD.DatabaseServices.Entity)
+                                       tempTr.GetObject(id, Autodesk.AutoCAD.DatabaseServices.OpenMode.ForWrite);
+                            ent.Erase();
+                        }
+                        tempTr.Commit();
+                    }
+
+                    tempDb.SaveAs(outputPath, Autodesk.AutoCAD.DatabaseServices.DwgVersion.Current);
+                }
+            }
+            finally
+            {
+                // ── Step 6: Erase temp entities from active doc ───────────────
+                using (var eraseTr = db.TransactionManager.StartTransaction())
+                {
+                    foreach (Autodesk.AutoCAD.DatabaseServices.ObjectId id in topViewIds)
+                    {
+                        if (id.IsErased) continue;
+                        var ent = (Autodesk.AutoCAD.DatabaseServices.Entity)
+                                   eraseTr.GetObject(id,
+                                       Autodesk.AutoCAD.DatabaseServices.OpenMode.ForWrite, true);
+                        ent.Erase();
+                    }
+                    eraseTr.Commit();
+                }
+
+                if (!string.IsNullOrEmpty(origFilename) && System.IO.File.Exists(origFilename))
+                    try { db.SaveAs(origFilename, Autodesk.AutoCAD.DatabaseServices.DwgVersion.Current); } catch { }
+
+                try { System.IO.File.Delete(tempPath); } catch { }
+                DocumentManager.UnlockCurrentDocument();
+            }
         }
 
 
 
         private static void SaveRightViewDwg(List<MemberData> members, string outputPath, bool mirror = false)
         {
-            // Right elevation: Y horizontal, Z vertical (drop X).
-            using var elevDb = new Autodesk.AutoCAD.DatabaseServices.Database(true, true);
+            // Right/left elevation: Y horizontal, Z vertical (drop X).
+            // Identical save-to-temp → filter-by-layer pattern as SaveTopViewDwg.
+            var doc = AcadApp.DocumentManager.MdiActiveDocument;
+            var db  = doc.Database;
 
-            using var tr = elevDb.TransactionManager.StartTransaction();
+            const string TV_LAYER = "AUTOGEN_RIGHT_VIEW_2D";
+            double minY = members.Min(m => Math.Min(m.Ys, m.Ye));
+            double maxY = members.Max(m => Math.Max(m.Ys, m.Ye));
+            double minZ = members.Min(m => Math.Min(m.Zs, m.Ze));
 
-            var bt = (Autodesk.AutoCAD.DatabaseServices.BlockTable)
-                tr.GetObject(elevDb.BlockTableId,
-                    Autodesk.AutoCAD.DatabaseServices.OpenMode.ForRead);
+            DocumentManager.LockCurrentDocument();
 
-            var btr = (Autodesk.AutoCAD.DatabaseServices.BlockTableRecord)
-                tr.GetObject(
-                    bt[Autodesk.AutoCAD.DatabaseServices.BlockTableRecord.ModelSpace],
-                    Autodesk.AutoCAD.DatabaseServices.OpenMode.ForWrite);
-
-            foreach (var m in members)
+            // ── Step 1: Create export layer ───────────────────────────────────
+            Autodesk.AutoCAD.DatabaseServices.ObjectId tvLayerId;
+            using (var lyrTr = db.TransactionManager.StartTransaction())
             {
-
-                double y1 = mirror ? -m.Ys : m.Ys;
-                double y2 = mirror ? -m.Ye : m.Ye;
-
-                double z1 = m.Zs;
-                double z2 = m.Ze;
-
-                double dy = y2 - y1;
-                double dz = z2 - z1;
-
-                double len = Math.Sqrt(dy * dy + dz * dz);
-                if (len < 1e-6) continue;
-
-                // perpendicular direction
-                double py = -dz / len;
-                double pz = dy / len;
-
-                double halfWidth = GetLegSize(m) / 2.0;
-
-                var p1 = new Autodesk.AutoCAD.Geometry.Point2d(y1 + py * halfWidth, z1 + pz * halfWidth);
-                var p2 = new Autodesk.AutoCAD.Geometry.Point2d(y2 + py * halfWidth, z2 + pz * halfWidth);
-                var p3 = new Autodesk.AutoCAD.Geometry.Point2d(y2 - py * halfWidth, z2 - pz * halfWidth);
-                var p4 = new Autodesk.AutoCAD.Geometry.Point2d(y1 - py * halfWidth, z1 - pz * halfWidth);
-
-
-                var pline = new Autodesk.AutoCAD.DatabaseServices.Polyline(4);
-                pline.AddVertexAt(0, p1, 0, 0, 0);
-                pline.AddVertexAt(1, p2, 0, 0, 0);
-                pline.AddVertexAt(2, p3, 0, 0, 0);
-                pline.AddVertexAt(3, p4, 0, 0, 0);
-                pline.Closed = true;
-
-                btr.AppendEntity(pline);
-                tr.AddNewlyCreatedDBObject(pline, true);
+                var lt = (Autodesk.AutoCAD.DatabaseServices.LayerTable)
+                          lyrTr.GetObject(db.LayerTableId,
+                              Autodesk.AutoCAD.DatabaseServices.OpenMode.ForWrite);
+                if (lt.Has(TV_LAYER))
+                {
+                    tvLayerId = lt[TV_LAYER];
+                }
+                else
+                {
+                    var lr = new Autodesk.AutoCAD.DatabaseServices.LayerTableRecord
+                        { Name = TV_LAYER };
+                    tvLayerId = lt.Add(lr);
+                    lyrTr.AddNewlyCreatedDBObject(lr, true);
+                }
+                lyrTr.Commit();
             }
 
-            // Title text
-            double cy = (members.Min(m => Math.Min(m.Ys, m.Ye)) +
-                         members.Max(m => Math.Max(m.Ys, m.Ye))) / 2.0;
+            // ── Step 2: Switch to TV_LAYER, write AS StraightBeam members ─────
+            // Map into XY plane at Z=0: horizontal = m.Ys/Ye (negated if left), vertical = m.Zs/Ze
+            var savedClayer = db.Clayer;
+            db.Clayer = tvLayerId;
 
-            double bz = members.Min(m => Math.Min(m.Zs, m.Ze)) - 500.0;
-
-            var txt = new Autodesk.AutoCAD.DatabaseServices.DBText
+            using (var asTr = TransactionManager.StartTransaction())
             {
-                TextString = mirror ? "LEFT VIEW" : "RIGHT VIEW",
-                Height = 200.0,
-                Position = new Autodesk.AutoCAD.Geometry.Point3d(cy, bz, 0),
-                HorizontalMode = Autodesk.AutoCAD.DatabaseServices.TextHorizontalMode.TextCenter,
-                VerticalMode = Autodesk.AutoCAD.DatabaseServices.TextVerticalMode.TextBase,
-                AlignmentPoint = new Autodesk.AutoCAD.Geometry.Point3d(cy, bz, 0),
-            };
+                foreach (var m in members)
+                {
+                    double dy = m.Ye - m.Ys, dz = m.Ze - m.Zs;
+                    if (Math.Sqrt(dy * dy + dz * dz) < 1e-6) continue;
 
-            btr.AppendEntity(txt);
-            tr.AddNewlyCreatedDBObject(txt, true);
+                    double sy = mirror ? -m.Ys : m.Ys;
+                    double ey = mirror ? -m.Ye : m.Ye;
+                    CreateLinearMember(
+                        new ASPoint3d(sy, m.Zs, 0),
+                        new ASPoint3d(ey, m.Ze, 0),
+                        AngleProfile);
+                }
+                asTr.Commit();
+            }
 
-            tr.Commit();
+            db.Clayer = savedClayer;
 
-            elevDb.SaveAs(outputPath, Autodesk.AutoCAD.DatabaseServices.DwgVersion.Current);
+            // ── Step 3: Collect TV_LAYER IDs + add title text ─────────────────
+            var topViewIds = new Autodesk.AutoCAD.DatabaseServices.ObjectIdCollection();
+            using (var acadTr = db.TransactionManager.StartTransaction())
+            {
+                var bt  = (Autodesk.AutoCAD.DatabaseServices.BlockTable)
+                           acadTr.GetObject(db.BlockTableId,
+                               Autodesk.AutoCAD.DatabaseServices.OpenMode.ForRead);
+                var btr = (Autodesk.AutoCAD.DatabaseServices.BlockTableRecord)
+                           acadTr.GetObject(
+                               bt[Autodesk.AutoCAD.DatabaseServices.BlockTableRecord.ModelSpace],
+                               Autodesk.AutoCAD.DatabaseServices.OpenMode.ForWrite);
+
+                foreach (Autodesk.AutoCAD.DatabaseServices.ObjectId id in btr)
+                {
+                    if (id.IsErased) continue;
+                    var ent = (Autodesk.AutoCAD.DatabaseServices.Entity)
+                               acadTr.GetObject(id, Autodesk.AutoCAD.DatabaseServices.OpenMode.ForRead);
+                    if (ent.Layer == TV_LAYER) topViewIds.Add(id);
+                }
+
+                double cy     = (minY + maxY) / 2.0;
+                double titleY = mirror ? -cy : cy;
+                var txt = new Autodesk.AutoCAD.DatabaseServices.DBText();
+                txt.SetDatabaseDefaults();
+                txt.Layer          = TV_LAYER;
+                txt.TextString     = mirror ? "LEFT VIEW" : "RIGHT VIEW";
+                txt.Height         = 200.0;
+                txt.HorizontalMode = Autodesk.AutoCAD.DatabaseServices.TextHorizontalMode.TextCenter;
+                txt.VerticalMode   = Autodesk.AutoCAD.DatabaseServices.TextVerticalMode.TextBase;
+                txt.Position       = new Autodesk.AutoCAD.Geometry.Point3d(titleY, minZ - 500.0, 0);
+                txt.AlignmentPoint = new Autodesk.AutoCAD.Geometry.Point3d(titleY, minZ - 500.0, 0);
+                btr.AppendEntity(txt);
+                acadTr.AddNewlyCreatedDBObject(txt, true);
+                topViewIds.Add(txt.ObjectId);
+                acadTr.Commit();
+            }
+
+            string? origFilename = db.Filename;
+            string tempPath = System.IO.Path.Combine(
+                System.IO.Path.GetTempPath(),
+                System.IO.Path.GetRandomFileName() + ".dwg");
+
+            try
+            {
+                // ── Step 4: Save full drawing to temp ─────────────────────────
+                db.SaveAs(tempPath, Autodesk.AutoCAD.DatabaseServices.DwgVersion.Current);
+
+                // ── Step 5: Filter temp DWG to TV_LAYER only, re-save ─────────
+                using (var tempDb = new Autodesk.AutoCAD.DatabaseServices.Database(false, true))
+                {
+                    tempDb.ReadDwgFile(tempPath,
+                        Autodesk.AutoCAD.DatabaseServices.FileOpenMode.OpenForReadAndWriteNoShare,
+                        false, "");
+
+                    using (var tempTr = tempDb.TransactionManager.StartTransaction())
+                    {
+                        var bt  = (Autodesk.AutoCAD.DatabaseServices.BlockTable)
+                                   tempTr.GetObject(tempDb.BlockTableId,
+                                       Autodesk.AutoCAD.DatabaseServices.OpenMode.ForRead);
+                        var btr = (Autodesk.AutoCAD.DatabaseServices.BlockTableRecord)
+                                   tempTr.GetObject(
+                                       bt[Autodesk.AutoCAD.DatabaseServices.BlockTableRecord.ModelSpace],
+                                       Autodesk.AutoCAD.DatabaseServices.OpenMode.ForRead);
+
+                        var toErase = new List<Autodesk.AutoCAD.DatabaseServices.ObjectId>();
+                        foreach (Autodesk.AutoCAD.DatabaseServices.ObjectId id in btr)
+                        {
+                            if (id.IsErased) continue;
+                            var ent = (Autodesk.AutoCAD.DatabaseServices.Entity)
+                                       tempTr.GetObject(id, Autodesk.AutoCAD.DatabaseServices.OpenMode.ForRead);
+                            if (ent.Layer != TV_LAYER) toErase.Add(id);
+                        }
+                        foreach (var id in toErase)
+                        {
+                            var ent = (Autodesk.AutoCAD.DatabaseServices.Entity)
+                                       tempTr.GetObject(id, Autodesk.AutoCAD.DatabaseServices.OpenMode.ForWrite);
+                            ent.Erase();
+                        }
+                        tempTr.Commit();
+                    }
+
+                    tempDb.SaveAs(outputPath, Autodesk.AutoCAD.DatabaseServices.DwgVersion.Current);
+                }
+            }
+            finally
+            {
+                // ── Step 6: Erase temp entities from active doc ───────────────
+                using (var eraseTr = db.TransactionManager.StartTransaction())
+                {
+                    foreach (Autodesk.AutoCAD.DatabaseServices.ObjectId id in topViewIds)
+                    {
+                        if (id.IsErased) continue;
+                        var ent = (Autodesk.AutoCAD.DatabaseServices.Entity)
+                                   eraseTr.GetObject(id,
+                                       Autodesk.AutoCAD.DatabaseServices.OpenMode.ForWrite, true);
+                        ent.Erase();
+                    }
+                    eraseTr.Commit();
+                }
+
+                if (!string.IsNullOrEmpty(origFilename) && System.IO.File.Exists(origFilename))
+                    try { db.SaveAs(origFilename, Autodesk.AutoCAD.DatabaseServices.DwgVersion.Current); } catch { }
+
+                try { System.IO.File.Delete(tempPath); } catch { }
+                DocumentManager.UnlockCurrentDocument();
+            }
         }
 
 
