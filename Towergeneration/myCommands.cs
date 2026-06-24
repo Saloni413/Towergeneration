@@ -143,55 +143,12 @@ namespace Towergeneration
                     return;
                 }
 
-                // Compute length (mm) and weight (kg) for every Angle member
-                var raw = td.Members
-                    .Where(m => m.Type == "Angle")
-                    .Select(m =>
-                    {
-                        double dx  = m.Xe - m.Xs;
-                        double dy  = m.Ye - m.Ys;
-                        double dz  = m.Ze - m.Zs;
-                        double len = Math.Sqrt(dx*dx + dy*dy + dz*dz); // mm
-                        double wt  = KgPerMetre * len / 1000.0;          // kg
-                        return (mark: m.Mark, len, wt);
-                    })
-                    .ToList();
-
-                if (raw.Count == 0)
+                var rows = BuildBomRows(td.Members);
+                if (rows.Count == 0)
                 {
                     ed.WriteMessage("\nNo Angle members found.");
                     return;
                 }
-
-                // Group by Mark, sort numerically where possible
-                var rows = raw
-                    .GroupBy(r => r.mark)
-                    .OrderBy(g =>
-                    {
-                        if (int.TryParse(g.Key, out int n)) return n;
-                        return int.MaxValue;
-                    })
-                    .ThenBy(g => g.Key)
-                    .Select(g =>
-                    {
-                        int    qty     = g.Count();
-                        double lenMm   = g.First().len;
-                        double partWt  = KgPerMetre * lenMm / 1000.0;
-                        double totalWt = partWt * qty;
-
-                        return new BomRow
-                        {
-                            Quantity    = qty,
-                            Mark        = g.Key,
-                            Description = SectionDesc,
-                            Length      = ((int)Math.Round(lenMm)).ToString("N0"),
-                            Grade       = SectionGrade,
-                            PartWeight  = partWt.ToString("F1"),
-                            TotalWeight = totalWt.ToString("F1"),
-                            Remark      = ""
-                        };
-                    })
-                    .ToList();
 
                 ed.WriteMessage("\n" + rows.Count + " mark(s) — opening BOM window.");
                 AcadApp.ShowModalWindow(null, BuildBomWindow(rows), false);
@@ -200,6 +157,49 @@ namespace Towergeneration
             {
                 ed.WriteMessage("\nERROR (GENERATEBOM): " + ex.Message + "\n" + ex.StackTrace);
             }
+        }
+
+        // ── BuildBomRows ─────────────────────────────────────────────────────────
+
+        private static List<BomRow> BuildBomRows(List<MemberData> members)
+        {
+            var raw = members
+                .Where(m => m.Type == "Angle")
+                .Select(m =>
+                {
+                    double dx  = m.Xe - m.Xs;
+                    double dy  = m.Ye - m.Ys;
+                    double dz  = m.Ze - m.Zs;
+                    double len = Math.Sqrt(dx*dx + dy*dy + dz*dz);
+                    return (mark: m.Mark, len);
+                })
+                .ToList();
+
+            if (raw.Count == 0) return new List<BomRow>();
+
+            return raw
+                .GroupBy(r => r.mark)
+                .OrderBy(g => int.TryParse(g.Key, out int n) ? n : int.MaxValue)
+                .ThenBy(g => g.Key)
+                .Select(g =>
+                {
+                    int    qty     = g.Count();
+                    double lenMm   = g.First().len;
+                    double partWt  = KgPerMetre * lenMm / 1000.0;
+                    double totalWt = partWt * qty;
+                    return new BomRow
+                    {
+                        Quantity    = qty,
+                        Mark        = g.Key,
+                        Description = SectionDesc,
+                        Length      = ((int)Math.Round(lenMm)).ToString("N0"),
+                        Grade       = SectionGrade,
+                        PartWeight  = partWt.ToString("F1"),
+                        TotalWeight = totalWt.ToString("F1"),
+                        Remark      = ""
+                    };
+                })
+                .ToList();
         }
 
         // ── BOM window — exact Advance Steel PDF template ────────────────────────
@@ -1896,6 +1896,358 @@ namespace Towergeneration
 
 
 
+
+        // ── GENERATESHOPSKETCHES ─────────────────────────────────────────────────
+
+        [CommandMethod("GENERATESHOPSKETCHES", CommandFlags.Modal)]
+        public static void GenerateShopSketches()
+        {
+            var doc = AcadApp.DocumentManager.MdiActiveDocument;
+            if (doc == null) return;
+            var ed = doc.Editor;
+
+            try
+            {
+                if (!File.Exists(JsonPath))
+                {
+                    ed.WriteMessage("\nJSON file not found: " + JsonPath);
+                    return;
+                }
+
+                string json = File.ReadAllText(JsonPath);
+                TowerData? td = JsonConvert.DeserializeObject<TowerData>(json);
+
+                if (td?.Members == null || td.Members.Count == 0)
+                {
+                    ed.WriteMessage("\nNo member data found.");
+                    return;
+                }
+
+                var bomRows = BuildBomRows(td.Members);
+                if (bomRows.Count == 0)
+                {
+                    ed.WriteMessage("\nNo Angle members found.");
+                    return;
+                }
+
+                var dlg = new Microsoft.Win32.SaveFileDialog
+                {
+                    Title            = "Save Shop Sketches as DWG",
+                    Filter           = "AutoCAD Drawing (*.dwg)|*.dwg|All Files (*.*)|*.*",
+                    DefaultExt       = ".dwg",
+                    FileName         = "ShopSketches.dwg",
+                    InitialDirectory = Path.GetDirectoryName(JsonPath) ?? @"C:\"
+                };
+
+                if (dlg.ShowDialog() != true) return;
+
+                SaveShopSketchesDwg(bomRows, dlg.FileName);
+                if (File.Exists(dlg.FileName))
+                    ed.WriteMessage("\nShop sketches saved: " + dlg.FileName);
+                else
+                    ed.WriteMessage("\nERROR: File was not created at: " + dlg.FileName);
+            }
+            catch (System.Exception ex)
+            {
+                ed.WriteMessage("\nERROR (GENERATESHOPSKETCHES): " + ex.Message
+                                + "\n" + ex.StackTrace);
+            }
+        }
+
+        // ── SaveShopSketchesDwg ───────────────────────────────────────────────────
+
+        private static void SaveShopSketchesDwg(List<BomRow> bomRows, string outputPath)
+        {
+            const double PAGE_MARGIN = 10.0;
+            const double CELL_W     = 160.0;
+            const double CELL_H     = 95.0;
+            const double COL_GAP    = 10.0;
+            const double ROW_GAP    = 5.0;
+            const double TITLE_H    = 34.0;
+            const double TITLE_GAP  = 8.0;
+            const double SUMMARY_W  = 110.0;
+
+            int    totalGridRows = (bomRows.Count + 1) / 2;
+            double cellsBottomY  = PAGE_MARGIN + TITLE_H + TITLE_GAP;
+            double pageTopY      = cellsBottomY + totalGridRows * (CELL_H + ROW_GAP) - ROW_GAP;
+            double summaryX      = PAGE_MARGIN + 2 * CELL_W + COL_GAP + 10.0;
+
+            using (var skDb = new Autodesk.AutoCAD.DatabaseServices.Database(true, true))
+            {
+                using (var skTr = skDb.TransactionManager.StartTransaction())
+                {
+                    var bt  = (Autodesk.AutoCAD.DatabaseServices.BlockTable)
+                               skTr.GetObject(skDb.BlockTableId,
+                                   Autodesk.AutoCAD.DatabaseServices.OpenMode.ForRead);
+                    var btr = (Autodesk.AutoCAD.DatabaseServices.BlockTableRecord)
+                               skTr.GetObject(
+                                   bt[Autodesk.AutoCAD.DatabaseServices.BlockTableRecord.ModelSpace],
+                                   Autodesk.AutoCAD.DatabaseServices.OpenMode.ForWrite);
+
+                    for (int i = 0; i < bomRows.Count; i++)
+                    {
+                        int    col   = i % 2;
+                        int    row   = i / 2;
+                        double cellX = PAGE_MARGIN + col * (CELL_W + COL_GAP);
+                        double cellY = pageTopY - row * (CELL_H + ROW_GAP) - CELL_H;
+                        SkDrawCell(btr, skTr, skDb, cellX, cellY, bomRows[i]);
+                    }
+
+                    SkDrawSummaryTable(btr, skTr, skDb, bomRows, summaryX, SUMMARY_W, pageTopY);
+                    SkDrawTitleBlock(btr, skTr, skDb, bomRows,
+                        PAGE_MARGIN, PAGE_MARGIN, 2 * CELL_W + COL_GAP);
+
+                    skTr.Commit();
+                }
+
+                skDb.SaveAs(outputPath, Autodesk.AutoCAD.DatabaseServices.DwgVersion.Current);
+            }
+        }
+
+        // ── SkDrawCell ────────────────────────────────────────────────────────────
+
+        private static void SkDrawCell(
+            Autodesk.AutoCAD.DatabaseServices.BlockTableRecord btr,
+            Autodesk.AutoCAD.DatabaseServices.Transaction tr,
+            Autodesk.AutoCAD.DatabaseServices.Database db,
+            double x, double y, BomRow row)
+        {
+            const double CELL_W   = 160.0;
+            const double CELL_H   = 95.0;
+            const double DIM_H    = 15.0;
+            const double SKETCH_H = 44.0;
+            const double GRADE_H  = 14.0;
+
+            double yDimTop    = y + DIM_H;
+            double ySketchTop = yDimTop + SKETCH_H;
+            double yGradeTop  = ySketchTop + GRADE_H;
+            double yHdrTop    = y + CELL_H;
+
+            SkRect(btr, tr, x, y, CELL_W, CELL_H);
+            SkLine(btr, tr, x, yDimTop,    x + CELL_W, yDimTop);
+            SkLine(btr, tr, x, ySketchTop, x + CELL_W, ySketchTop);
+            SkLine(btr, tr, x, yGradeTop,  x + CELL_W, yGradeTop);
+
+            double xDiv = x + CELL_W * 0.65;
+            SkLine(btr, tr, xDiv, yGradeTop, xDiv, yHdrTop);
+
+            // Header (cyan = ACI 4)
+            double hdrMidY = y + CELL_H - 11.0;
+            SkText(btr, tr, db, $"Re {row.Mark}", x + 3, hdrMidY, 5.0, 4);
+            SkCenterText(btr, tr, db, $"{row.Quantity}(0)",
+                (xDiv + x + CELL_W) / 2.0, hdrMidY, 4.5, 4);
+
+            // Grade
+            SkCenterText(btr, tr, db, $"{row.Grade} - 1:0",
+                x + CELL_W / 2.0, ySketchTop + GRADE_H * 0.35, 3.5);
+
+            // L cross-section (blue = ACI 5)
+            SkLSection(btr, tr, x + 6.0, yDimTop + (SKETCH_H - 18.0) / 2.0, 18.0, 4.0, 5);
+
+            // Body bar (red = ACI 1)
+            double barX = x + 33.0;
+            double barW = CELL_W - 43.0;
+            double barH = 12.0;
+            double barY = yDimTop + (SKETCH_H - barH) / 2.0;
+            SkRect(btr, tr, barX, barY, barW, barH, 1);
+
+            for (int ci = 1; ci <= 2; ci++)
+            {
+                double cx  = barX + barW * ci / 3.0;
+                double tip = cx - 5.0;
+                SkLine(btr, tr, cx, barY,        tip, barY + barH / 2.0);
+                SkLine(btr, tr, cx, barY + barH, tip, barY + barH / 2.0);
+            }
+
+            // Dimension
+            double dimY  = y + DIM_H * 0.42;
+            double dimX1 = x + 5.0;
+            double dimX2 = x + CELL_W - 5.0;
+            SkLine(btr, tr, dimX1, dimY, dimX2, dimY);
+            SkLine(btr, tr, dimX1, dimY, dimX1 + 3, dimY + 1.5);
+            SkLine(btr, tr, dimX1, dimY, dimX1 + 3, dimY - 1.5);
+            SkLine(btr, tr, dimX2, dimY, dimX2 - 3, dimY + 1.5);
+            SkLine(btr, tr, dimX2, dimY, dimX2 - 3, dimY - 1.5);
+            SkCenterText(btr, tr, db, row.Length.Replace(",", "").Trim(),
+                x + CELL_W / 2.0, dimY + 2.0, 3.0);
+        }
+
+        // ── SkDrawSummaryTable ────────────────────────────────────────────────────
+
+        private static void SkDrawSummaryTable(
+            Autodesk.AutoCAD.DatabaseServices.BlockTableRecord btr,
+            Autodesk.AutoCAD.DatabaseServices.Transaction tr,
+            Autodesk.AutoCAD.DatabaseServices.Database db,
+            List<BomRow> rows, double x, double tableW, double topY)
+        {
+            double[] cw = { 36.0, 38.0, 36.0 };
+            string[] ch = { "Mark", "Qty", "In Assy" };
+
+            double curY = topY;
+
+            SkRect(btr, tr, x, curY - 10, tableW, 10);
+            SkCenterText(btr, tr, db, "PART LIST", x + tableW / 2.0, curY - 7, 3.5);
+            curY -= 10;
+
+            double cx = x;
+            for (int c = 0; c < cw.Length; c++)
+            {
+                SkRect(btr, tr, cx, curY - 8, cw[c], 8);
+                SkCenterText(btr, tr, db, ch[c], cx + cw[c] / 2.0, curY - 6, 2.8);
+                cx += cw[c];
+            }
+            curY -= 8;
+
+            foreach (var row in rows)
+            {
+                cx = x;
+                string[] vals = { row.Mark, row.Quantity.ToString(), "1" };
+                for (int c = 0; c < cw.Length; c++)
+                {
+                    SkRect(btr, tr, cx, curY - 8, cw[c], 8);
+                    SkCenterText(btr, tr, db, vals[c], cx + cw[c] / 2.0, curY - 6, 2.5);
+                    cx += cw[c];
+                }
+                curY -= 8;
+            }
+        }
+
+        // ── SkDrawTitleBlock ──────────────────────────────────────────────────────
+
+        private static void SkDrawTitleBlock(
+            Autodesk.AutoCAD.DatabaseServices.BlockTableRecord btr,
+            Autodesk.AutoCAD.DatabaseServices.Transaction tr,
+            Autodesk.AutoCAD.DatabaseServices.Database db,
+            List<BomRow> rows, double x, double y, double blockW)
+        {
+            SkRect(btr, tr, x, y, blockW, 14);
+            SkCenterText(btr, tr, db, "SINGLE PART DRAWING", x + blockW / 2.0, y + 5, 6.0);
+
+            SkRect(btr, tr, x, y + 14, blockW, 10);
+            SkText(btr, tr, db, "Part Nos:", x + 3, y + 17, 3.5);
+            SkRightText(btr, tr, db, System.DateTime.Now.ToString("d-MMM-yy"),
+                x + blockW - 3, y + 17, 3.5);
+
+            SkRect(btr, tr, x, y + 24, blockW, 10);
+            string markList = string.Join(" ", rows.Select(r => r.Mark));
+            if (markList.Length > 80) markList = markList.Substring(0, 77) + "...";
+            SkCenterText(btr, tr, db, markList, x + blockW / 2.0, y + 27, 3.0);
+        }
+
+        // ── Sketch drawing primitives ─────────────────────────────────────────────
+
+        private static void SkRect(
+            Autodesk.AutoCAD.DatabaseServices.BlockTableRecord btr,
+            Autodesk.AutoCAD.DatabaseServices.Transaction tr,
+            double x, double y, double w, double h, short aci = 256)
+        {
+            var pl = new Autodesk.AutoCAD.DatabaseServices.Polyline();
+            pl.AddVertexAt(0, new Autodesk.AutoCAD.Geometry.Point2d(x,     y    ), 0, 0, 0);
+            pl.AddVertexAt(1, new Autodesk.AutoCAD.Geometry.Point2d(x + w, y    ), 0, 0, 0);
+            pl.AddVertexAt(2, new Autodesk.AutoCAD.Geometry.Point2d(x + w, y + h), 0, 0, 0);
+            pl.AddVertexAt(3, new Autodesk.AutoCAD.Geometry.Point2d(x,     y + h), 0, 0, 0);
+            pl.Closed = true;
+            if (aci != 256)
+                pl.Color = Autodesk.AutoCAD.Colors.Color.FromColorIndex(
+                    Autodesk.AutoCAD.Colors.ColorMethod.ByAci, aci);
+            btr.AppendEntity(pl);
+            tr.AddNewlyCreatedDBObject(pl, true);
+        }
+
+        private static void SkLine(
+            Autodesk.AutoCAD.DatabaseServices.BlockTableRecord btr,
+            Autodesk.AutoCAD.DatabaseServices.Transaction tr,
+            double x1, double y1, double x2, double y2, short aci = 256)
+        {
+            var ln = new Autodesk.AutoCAD.DatabaseServices.Line(
+                new Autodesk.AutoCAD.Geometry.Point3d(x1, y1, 0),
+                new Autodesk.AutoCAD.Geometry.Point3d(x2, y2, 0));
+            if (aci != 256)
+                ln.Color = Autodesk.AutoCAD.Colors.Color.FromColorIndex(
+                    Autodesk.AutoCAD.Colors.ColorMethod.ByAci, aci);
+            btr.AppendEntity(ln);
+            tr.AddNewlyCreatedDBObject(ln, true);
+        }
+
+        private static void SkText(
+            Autodesk.AutoCAD.DatabaseServices.BlockTableRecord btr,
+            Autodesk.AutoCAD.DatabaseServices.Transaction tr,
+            Autodesk.AutoCAD.DatabaseServices.Database db,
+            string text, double x, double y, double height, short aci = 256)
+        {
+            var tx = new Autodesk.AutoCAD.DatabaseServices.DBText();
+            tx.TextStyleId = db.Textstyle;
+            tx.TextString  = text;
+            tx.Height      = height;
+            tx.Position    = new Autodesk.AutoCAD.Geometry.Point3d(x, y, 0);
+            if (aci != 256)
+                tx.Color = Autodesk.AutoCAD.Colors.Color.FromColorIndex(
+                    Autodesk.AutoCAD.Colors.ColorMethod.ByAci, aci);
+            btr.AppendEntity(tx);
+            tr.AddNewlyCreatedDBObject(tx, true);
+        }
+
+        private static void SkCenterText(
+            Autodesk.AutoCAD.DatabaseServices.BlockTableRecord btr,
+            Autodesk.AutoCAD.DatabaseServices.Transaction tr,
+            Autodesk.AutoCAD.DatabaseServices.Database db,
+            string text, double x, double y, double height, short aci = 256)
+        {
+            var tx = new Autodesk.AutoCAD.DatabaseServices.DBText();
+            tx.TextStyleId    = db.Textstyle;
+            tx.TextString     = text;
+            tx.Height         = height;
+            tx.HorizontalMode = Autodesk.AutoCAD.DatabaseServices.TextHorizontalMode.TextCenter;
+            tx.VerticalMode   = Autodesk.AutoCAD.DatabaseServices.TextVerticalMode.TextBase;
+            tx.Position       = new Autodesk.AutoCAD.Geometry.Point3d(x, y, 0);
+            tx.AlignmentPoint = new Autodesk.AutoCAD.Geometry.Point3d(x, y, 0);
+            if (aci != 256)
+                tx.Color = Autodesk.AutoCAD.Colors.Color.FromColorIndex(
+                    Autodesk.AutoCAD.Colors.ColorMethod.ByAci, aci);
+            btr.AppendEntity(tx);
+            tr.AddNewlyCreatedDBObject(tx, true);
+        }
+
+        private static void SkRightText(
+            Autodesk.AutoCAD.DatabaseServices.BlockTableRecord btr,
+            Autodesk.AutoCAD.DatabaseServices.Transaction tr,
+            Autodesk.AutoCAD.DatabaseServices.Database db,
+            string text, double x, double y, double height, short aci = 256)
+        {
+            var tx = new Autodesk.AutoCAD.DatabaseServices.DBText();
+            tx.TextStyleId    = db.Textstyle;
+            tx.TextString     = text;
+            tx.Height         = height;
+            tx.HorizontalMode = Autodesk.AutoCAD.DatabaseServices.TextHorizontalMode.TextRight;
+            tx.VerticalMode   = Autodesk.AutoCAD.DatabaseServices.TextVerticalMode.TextBase;
+            tx.Position       = new Autodesk.AutoCAD.Geometry.Point3d(x, y, 0);
+            tx.AlignmentPoint = new Autodesk.AutoCAD.Geometry.Point3d(x, y, 0);
+            if (aci != 256)
+                tx.Color = Autodesk.AutoCAD.Colors.Color.FromColorIndex(
+                    Autodesk.AutoCAD.Colors.ColorMethod.ByAci, aci);
+            btr.AppendEntity(tx);
+            tr.AddNewlyCreatedDBObject(tx, true);
+        }
+
+        private static void SkLSection(
+            Autodesk.AutoCAD.DatabaseServices.BlockTableRecord btr,
+            Autodesk.AutoCAD.DatabaseServices.Transaction tr,
+            double ox, double oy, double legSize, double thickness, short aci = 256)
+        {
+            var pl = new Autodesk.AutoCAD.DatabaseServices.Polyline();
+            pl.AddVertexAt(0, new Autodesk.AutoCAD.Geometry.Point2d(ox,             oy            ), 0, 0, 0);
+            pl.AddVertexAt(1, new Autodesk.AutoCAD.Geometry.Point2d(ox + legSize,   oy            ), 0, 0, 0);
+            pl.AddVertexAt(2, new Autodesk.AutoCAD.Geometry.Point2d(ox + legSize,   oy + thickness), 0, 0, 0);
+            pl.AddVertexAt(3, new Autodesk.AutoCAD.Geometry.Point2d(ox + thickness, oy + thickness), 0, 0, 0);
+            pl.AddVertexAt(4, new Autodesk.AutoCAD.Geometry.Point2d(ox + thickness, oy + legSize  ), 0, 0, 0);
+            pl.AddVertexAt(5, new Autodesk.AutoCAD.Geometry.Point2d(ox,             oy + legSize  ), 0, 0, 0);
+            pl.Closed = true;
+            if (aci != 256)
+                pl.Color = Autodesk.AutoCAD.Colors.Color.FromColorIndex(
+                    Autodesk.AutoCAD.Colors.ColorMethod.ByAci, aci);
+            btr.AppendEntity(pl);
+            tr.AddNewlyCreatedDBObject(pl, true);
+        }
 
         // ── Elevation drawing helpers ────────────────────────────────────────────
 
