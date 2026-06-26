@@ -21,6 +21,14 @@
     <PackageReference Include="PdfSharp" Version="6.2.0" />
   </ItemGroup>
 
+  <!-- AcWindows – provides PaletteSet (already loaded by AutoCAD at runtime) -->
+  <ItemGroup>
+    <Reference Include="AcWindows">
+      <HintPath>C:\Program Files\Autodesk\AutoCAD 2026\AcWindows.dll</HintPath>
+      <Private>False</Private>
+    </Reference>
+  </ItemGroup>
+
   <!-- Advance Steel managed API – not copied to output (AS loads them at runtime) -->
   <ItemGroup>
     <Reference Include="ASMgd">
@@ -60,5 +68,15 @@
   </ItemGroup>
   <ItemGroup>
     <Folder Include="Properties\" />
+  </ItemGroup>
+  <ItemGroup>
+    <Content Include="..\tower logo.png">
+      <CopyToOutputDirectory>Always</CopyToOutputDirectory>
+      <Link>tower logo.png</Link>
+    </Content>
+    <Content Include="..\cctech logo image.png">
+      <CopyToOutputDirectory>Always</CopyToOutputDirectory>
+      <Link>cctech logo image.png</Link>
+    </Content>
   </ItemGroup>
 </Project>

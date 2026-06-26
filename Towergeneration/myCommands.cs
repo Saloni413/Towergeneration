@@ -44,9 +44,12 @@ namespace Towergeneration
     public class MyCommands
     {
         private const string AngleProfile = "L100x10";
-
+        //shravani
+        //shravani
+        //shravani
+        //shravani
         private const string JsonPath =
-            @"C:\Kalpataru Project\Towergeneration_trial\Correct.json";      
+            @"C:\Users\Saloni Kumari\Downloads\gemini-code-1782451940500.json";      
 
         // L100x10 section: 15.1 kg/m  (EN 10056-1)
         private const double KgPerMetre = 15.1;
